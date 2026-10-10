@@ -37,6 +37,7 @@ local recorders = {
   end,
   SetText = function(self, v) slot(self).text = v end,
   GetText = function(self) return slot(self).text end,
+  GetUnboundedStringWidth = function(self) return #(slot(self).text or "") * 7 end,
   SetDefaultText = function(self, v) slot(self).defaultText = v end,
   GetDefaultText = function(self) return slot(self).defaultText end,
   SetWidth = function(self, v) slot(self).width = v end,

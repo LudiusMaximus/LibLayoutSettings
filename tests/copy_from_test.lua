@@ -54,9 +54,13 @@ function barFrame:IsMouseEnabled() return true end
 function barFrame:EnableMouse() end
 function barFrame:GetFrameStrata() return "MEDIUM" end
 
--- Travel is active. Raiding and Mine already hold a look; Modern, a preset,
--- holds nothing yet.
+-- Travel is active. Raiding and Mine already hold a look. Modern, a preset, holds
+-- one too, left over from before presets were refused.
 local storage = {
+  ["0:Modern"] = {
+    position = { point = "LEFT", relativePoint = "LEFT", x = 5, y = 0 },
+    settings = { width = 222, spark = false, barcolor = { r = 1, g = 1, b = 0 } },
+  },
   ["1:Travel"] = {
     position = { point = "BOTTOM", relativePoint = "TOP", x = 0, y = -170 },
     settings = { width = 300, spark = true, barcolor = { r = 1, g = 0, b = 0 } },
@@ -144,17 +148,10 @@ Check("switching layouts switches which one is left out", names() == "Mine,Trave
 EditModeManagerFrame:SelectLayout(2)   -- back to Travel
 H.OnLayoutsUpdated()
 
--- A preset is not excluded as such. It is simply not offered until it holds
--- something, which it only does if the player gave it a look from the options
--- menu while it was active.
-Check("a preset holding nothing is not offered", not names():find("Modern"))
-
-storage["0:Modern"] = {
-  position = { point = "LEFT", relativePoint = "LEFT", x = 5, y = 0 },
-  settings = { width = 222, spark = false, barcolor = { r = 1, g = 1, b = 0 } },
-}
-Check("a preset that was given a look is offered", names() == "Mine,Modern,Raiding")
-storage["0:Modern"] = nil
+-- A preset is never given anything, so whatever an older version stored for one
+-- is dropped on registration and never offered.
+Check("a leftover preset entry is dropped", storage["0:Modern"] == nil)
+Check("so a preset is not offered", not names():find("Modern"))
 
 -- An entry whose layout the player does not have is unreachable, which is what
 -- another character's character layout looks like from here.

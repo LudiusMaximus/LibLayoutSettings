@@ -28,7 +28,9 @@ What the library provides:
 Ticking a layout's checkbox stores the frame's current position and settings for
 that layout, so switching to it later restores them. A layout that does not own
 the frame hands it back to the addon's own settings, and unticking keeps the
-layout's look parked, so that ticking again brings it back.
+layout's look parked, so that ticking again brings it back. Like Blizzard's own
+checkboxes on that panel, ticking and unticking take effect at once: they are not
+a change to save, and no revert undoes them.
 
 README.md is the reference: every registration field, every setting descriptor
 field and the public API are described there, and only there, so that the two
@@ -52,6 +54,7 @@ local order = lib.order
 local floor = math.floor
 local max = math.max
 local min = math.min
+local ceil = math.ceil
 
 
 -- Every current client ships Blizzard_EditMode, down to Classic Era. On anything
@@ -105,6 +108,17 @@ local function ActiveLayoutKey()
     return nil
   end
   return LayoutKey(layout)
+end
+
+-- Blizzard's preset layouts are read only. Edit mode lets the player change one,
+-- but saving it makes a new layout and the preset stays as it was, so a frame may
+-- be ticked and edited on a preset during a session and is never stored there.
+local function IsPresetLayout(layout)
+  return layout ~= nil and layout.layoutType == Enum.EditModeLayoutType.Preset
+end
+
+local function IsPresetKey(key)
+  return key ~= nil and key:match("^(%d+):") == tostring(Enum.EditModeLayoutType.Preset)
 end
 
 
@@ -210,11 +224,9 @@ local function ApplyOrRestore(info, entry)
   end
 end
 
--- Whether this frame differs from where the player started editing it, which is
--- not the same as how the session found it. Ticking the checkbox is where editing
--- begins, so it moves the mark rather than counting as a change against it -
--- otherwise a frame no layout owned yet would have something to revert the moment
--- it was ticked, and reverting would undo the tick and close the dialog.
+-- Whether this frame's look differs from where the player started editing it.
+-- Ticking or unticking the checkbox is not a change (see SetManaged), so it moves
+-- the mark along with it rather than counting against it.
 --
 -- Both sides may be nil, which is a frame no layout owned and still does not.
 local function HasChanges(info)
@@ -286,6 +298,7 @@ end
 -- Blizzard reverts everything on exit unless the player pressed Save, so edits go
 -- into a pending copy first. baseline is what the layout held when the session
 -- started, live is how the frame looked, which is what a cancel has to restore.
+-- A tick or untick is not an edit, so it moves both along with it (see SetManaged).
 
 -- Set between Blizzard's revert and the frame after it. See ScheduleRevert.
 local revertScheduled = false
@@ -321,8 +334,10 @@ local function CommitSession()
     return
   end
 
+  -- Blizzard also saves for a rename or a deletion while a preset is active, and
+  -- leaves the edits made on the preset unsaved. These stay pending alongside them.
   local key = lib.sessionKey
-  if not key then
+  if not key or IsPresetKey(key) then
     return
   end
   for _, regKey in ipairs(order) do
@@ -366,12 +381,17 @@ end
 
 local RefreshPanel, RefreshOverlays, RefreshDialog, RefreshLayoutIndex
 
--- One row per registered frame, sized like Blizzard's own manager checkboxes.
-local panelRowWidth = 225
+-- One row per registered frame, as tall as Blizzard's own manager checkboxes and
+-- as wide as the longest name needs, so the panel hugs its contents.
 local panelRowHeight = 32
 local panelListInset = 22
 local panelHeaderHeight = 44
-local panelFooterHeight = 8
+local panelFooterHeight = 16
+-- The checkbox and the gap before its label, as EditModeCheckButtonTemplate has them.
+local panelCheckWidth = 32 + 5
+-- Room right of the longest name, and more once the scroll bar needs it.
+local panelRightInset = 20
+local panelScrollBarRoom = 33
 -- However many addons register, the panel stops growing here and scrolls the
 -- rest. Ten rows leaves it shorter than the manager it hangs off, so it cannot
 -- reach past the bottom of the screen on any resolution edit mode is usable at.
@@ -382,11 +402,10 @@ local function BuildPanel()
     return lib.panel
   end
 
-  -- Only the widths are set here. Every height belongs to RefreshPanel, which
-  -- runs before the panel is ever shown and sizes it to the rows it is holding.
+  -- No sizes are set here. They belong to RefreshPanel, which runs before the
+  -- panel is ever shown and sizes it to the rows it is holding.
   local panel = CreateFrame("Frame", nil, UIParent)
   panel:SetFrameStrata("DIALOG")
-  panel:SetWidth(270)
   panel:SetPoint("TOPLEFT", EditModeManagerFrame, "TOPRIGHT", 12, 0)
   panel:SetClampedToScreen(true)
   panel:EnableMouse(true)
@@ -403,13 +422,11 @@ local function BuildPanel()
   -- sits outside the rows and only appears when there is something to scroll.
   local list = CreateFrame("ScrollFrame", nil, panel, "ScrollFrameTemplate")
   list:SetPoint("TOPLEFT", panel, "TOPLEFT", panelListInset, -panelHeaderHeight)
-  list:SetWidth(panelRowWidth)
   if list.ScrollBar then
     list.ScrollBar:SetHideIfUnscrollable(true)
   end
 
   list.ScrollChild = CreateFrame("Frame", nil, list)
-  list.ScrollChild:SetWidth(panelRowWidth)
   list:SetScrollChild(list.ScrollChild)
 
   panel.List = list
@@ -1358,6 +1375,30 @@ function RefreshPanel()
     panel.rows[i]:Hide()
   end
 
+  -- As wide as the longest name. Measured unbounded, because the template gives
+  -- every label a fixed width and would cut a longer name off.
+  local widest = 0
+  for i = 1, index do
+    widest = max(widest, panel.rows[i].Label:GetUnboundedStringWidth())
+  end
+  widest = ceil(widest)
+  local rowWidth = panelCheckWidth + widest
+  for i = 1, index do
+    local row = panel.rows[i]
+    row.Label:SetWidth(widest)
+    -- The template lays its rows out at fixedWidth, so that has to follow too.
+    row.fixedWidth = rowWidth
+    row:SetWidth(rowWidth)
+  end
+  panel.List:SetWidth(rowWidth)
+  panel.List.ScrollChild:SetWidth(rowWidth)
+
+  -- Never narrower than the title above the list.
+  local scrolls = index > panelMaxRows
+  panel:SetWidth(max(
+    panelListInset + rowWidth + (scrolls and panelScrollBarRoom or panelRightInset),
+    ceil(panel.Title:GetUnboundedStringWidth()) + 2 * panelListInset))
+
   -- The list holds every row and shows at most panelMaxRows of them.
   local shown = max(min(index, panelMaxRows), 1)
   panel.List.ScrollChild:SetHeight(max(index, 1) * panelRowHeight)
@@ -1475,17 +1516,36 @@ end
 -- Enabling and disabling a frame for the active layout
 --------------------------------------------------------------------------------
 
+-- Returns a copy of the session's entry with only its ownership changed. An entry
+-- that does not exist yet starts out with the look the frame has just been given.
+local function WithOwnership(entry, look, managed)
+  if entry then
+    entry = CopyTable(entry)
+    entry.inactive = not managed or nil
+    return entry
+  end
+  if managed and look then
+    entry = CopyTable(look)
+    entry.inactive = nil
+    return entry
+  end
+  return nil
+end
+
 function lib:SetManaged(regKey, managed)
   local info = registrations[regKey]
   if not info then
     return
   end
 
-  local key = ActiveLayoutKey()
-  if not key then
+  -- Refused on a preset outside edit mode, where there would be no session to
+  -- carry the change into a new layout and the preset itself is never written.
+  if not lib:CanManage() then
     RefreshPanel()
     return
   end
+
+  local key = ActiveLayoutKey()
 
   local entry = CurrentEntry(info)
 
@@ -1503,12 +1563,6 @@ function lib:SetManaged(regKey, managed)
         info.storage[key] = entry
       end
     end
-
-    -- Ticking the box is where editing begins, so it moves the mark the revert
-    -- button measures against rather than counting as a change against it.
-    if lib.sessionKey then
-      info.revertPoint = CopyTable(info.pending)
-    end
   else
     -- Kept rather than deleted, so that ticking the box again brings this
     -- layout's own look back.
@@ -1523,7 +1577,25 @@ function lib:SetManaged(regKey, managed)
     end
   end
 
-  MarkDirty()
+  -- Ticking and unticking take effect at once, the way Blizzard's own checkboxes
+  -- on this panel do, so they are not a change: Save does not light up for them
+  -- and reverting leaves them alone. The session carries the new ownership into
+  -- everything it measures against, while the look in each stays what it was, so
+  -- edits made to the look are still the changes they were.
+  if lib.sessionKey then
+    info.baseline = WithOwnership(info.baseline, info.pending, managed)
+    info.revertPoint = WithOwnership(info.revertPoint, info.pending, managed)
+    if managed then
+      -- What reverting puts on the frame now that the layout owns it.
+      info.live = CopyTable(info.baseline)
+    end
+    -- A preset is never written, so there a tick lasts only as long as the session.
+    if not IsPresetKey(key) then
+      info.storage[key] = WithOwnership(info.storage[key], info.pending, managed)
+    end
+  end
+
+  RefreshButtonStates()
   RefreshPanel()
   RefreshOverlays()
 end
@@ -1675,10 +1747,16 @@ local function OnEditModeExit()
     ConsumeRevert()
   end
 
+  local key = lib.sessionKey
   lib.editModeActive = false
   lib:ClearSelection()
   RefreshOverlays()
   EndSession()
+  -- A tick on a preset lasts only as long as the session, so the frame is handed
+  -- back to what the preset really holds, which is nothing.
+  if IsPresetKey(key) then
+    ApplyLayout()
+  end
   if lib.panel then
     lib.panel:Hide()
   end
@@ -1705,7 +1783,9 @@ local function OnNewLayout(_, newLayoutInfo, layoutType, layoutName, isLayoutImp
   for regKey, entry in pairs(snapshot.entries) do
     local info = registrations[regKey]
     if info then
-      if oldKey then
+      -- The baseline carries any tick from this session, which on a preset is
+      -- never stored.
+      if oldKey and not IsPresetKey(oldKey) then
         info.storage[oldKey] = entry.baseline and CopyTable(entry.baseline) or nil
       end
       -- An imported layout was built from someone else's string, which carries
@@ -1809,6 +1889,17 @@ local function InstallHooks()
     handlers.ScheduleRevert(...)
   end)
 
+  -- Except that the Revert All Changes button never reaches that hook: it was
+  -- handed RevertAllChanges as a closure when it loaded, before any hook existed.
+  -- ScheduleRevert ignores a second call, so this stays right should Blizzard
+  -- ever change that.
+  local revertButton = EditModeManagerFrame.RevertAllChangesButton
+  if revertButton then
+    revertButton:HookScript("OnClick", function()
+      handlers.ScheduleRevert()
+    end)
+  end
+
   -- Runs whenever a Blizzard system reports in, and would otherwise grey the save
   -- button out again while there are still changes here.
   hooksecurefunc(EditModeManagerFrame, "CheckForSystemActiveChanges", function(...)
@@ -1875,9 +1966,20 @@ end
 
 --- Returns true while the active layout is one a frame can be given to. False
 -- under an override layout, the kind the game forces on the player, which is
--- never written to.
+-- never written to. False as well under one of Blizzard's preset layouts outside
+-- of edit mode: edit mode only lets a preset be changed by saving it as a new
+-- layout, so outside of it there is nowhere for the change to go.
 function lib:CanManage()
-  return ActiveLayoutKey() ~= nil
+  if not ActiveLayoutKey() then
+    return false
+  end
+  return not IsPresetLayout(ActiveLayout()) or lib.sessionKey ~= nil
+end
+
+--- Returns true while one of Blizzard's preset layouts is active, for an addon
+-- that wants to tell the player why CanManage is false.
+function lib:IsPresetActive()
+  return IsPresetLayout(ActiveLayout())
 end
 
 --- Returns the name of the layout that is active, for an addon that wants to
@@ -1922,6 +2024,15 @@ function lib:RegisterFrame(regKey, info)
     if setting.type == "slider" then
       assert(type(setting.minValue) == "number" and type(setting.maxValue) == "number",
         where .. "is a slider and so needs minValue and maxValue.")
+    end
+  end
+
+  -- Nothing is ever stored for a preset. An entry for one can only be left over
+  -- from before that was enforced, and would pin a look on a layout the player
+  -- has no way left to change.
+  for key in pairs(info.storage) do
+    if IsPresetKey(key) then
+      info.storage[key] = nil
     end
   end
 

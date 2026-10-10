@@ -14,7 +14,8 @@
 # template added there is covered without touching this file:
 #
 #   - every hooked or called EditModeManagerFrame method must exist,
-#   - every template, mixin and edit mode event it names must exist,
+#   - every template, mixin and edit mode event it names must exist, and every
+#     child of the manager it reaches for, a button say,
 #   - and the bodies of those methods, plus the few whose order the library relies
 #     on without hooking them, are compared with the base. A difference is not
 #     necessarily a break, so it is reported for a person to read.
@@ -41,11 +42,16 @@ methods=$( { printf '%s\n' "$src" | grep -oE 'hooksecurefunc\(EditModeManagerFra
 templates=$(printf '%s\n' "$src" | grep -oE '"[A-Za-z]+Template"' | tr -d '"' | sort -u)
 mixins=$(printf '%s\n' "$src" | grep -oE '\b(EditMode[A-Za-z]*Mixin|MinimalSlider[A-Za-z]*Mixin|CreateMinimalSliderFormatter)\b' | sort -u)
 events=$(printf '%s\n' "$src" | grep -oE 'RegisterCallback\("EditMode\.[A-Za-z]+"' | grep -oE 'EditMode\.[A-Za-z]+' | sort -u)
+# Fields read off the manager that are not its methods: child frames.
+children=$(printf '%s\n' "$src" | grep -oE 'EditModeManagerFrame\.[A-Z][A-Za-z]+' | sed 's/.*\.//' | sort -u \
+           | grep -vxF -f <(printf '%s\n' $methods))
 
 # Not hooked, but the library relies on what they do and in which order: saving
 # fires EditMode.SavedLayouts, entering and leaving fire Enter and Exit, and
-# switching layouts clears the selection.
-relied_on="SaveLayouts SelectLayout EnterEditMode ExitEditMode"
+# switching layouts clears the selection. OnLoad, because it hands the Revert All
+# Changes button a closure over RevertAllChanges, which is why the library hooks
+# the button as well as the method.
+relied_on="SaveLayouts SelectLayout EnterEditMode ExitEditMode OnLoad"
 compared=$(printf '%s\n' $methods $relied_on | sort -u)
 
 body() {   # ref, method: the method's body with whitespace collapsed
@@ -56,7 +62,7 @@ body() {   # ref, method: the method's body with whitespace collapsed
 
 status=0
 echo "LibLayoutSettings uses $(echo $methods | wc -w) manager methods, $(echo $templates | wc -w) templates," \
-     "$(echo $mixins | wc -w) mixins and helpers, and $(echo $events | wc -w) events."
+     "$(echo $mixins | wc -w) mixins and helpers, $(echo $events | wc -w) events and $(echo $children | wc -w) of its children."
 echo "Base: $base  ($(git -C "$repo" log -1 --format=%s "$base" 2>/dev/null))"
 echo
 
@@ -78,6 +84,9 @@ for ref in "${refs[@]}"; do
   done
   for e in $events; do
     git -C "$repo" grep -qF "\"$e\"" "$ref" -- 'Interface/*.lua' || missing+=("$e")
+  done
+  for c in $children; do
+    git -C "$repo" grep -qF "parentKey=\"$c\"" "$ref" -- 'Interface/AddOns/Blizzard_EditMode/*.xml' || missing+=("$c")
   done
 
   if [ ${#missing[@]} -eq 0 ]; then

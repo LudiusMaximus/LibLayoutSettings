@@ -103,7 +103,7 @@ There is one tooltip per **row**, never one per widget. A label and the control 
 
 A `revert` entry needs nothing but `{ type = "revert" }`. The library labels it with Blizzard's own `HUD_EDIT_MODE_REVERT_CHANGES`, reverts this frame when pressed, and enables it only while the frame actually differs - position and every setting included, whether they were changed from this dialog, from the addon's own settings, or by dragging the frame.
 
-It measures against where editing *began*, not against how the session found the frame. Ticking a frame's checkbox is where editing begins, so it moves that mark rather than counting as a change against it. Otherwise a frame no layout owned yet would have something to revert the moment it was ticked, and reverting it would undo the tick and close the dialog. Undoing the tick itself is what edit mode's own Revert All and Cancel are for. The state is updated in place rather than by redrawing the dialog, so it stays correct during a slider drag. Put one wherever Blizzard puts theirs, above the closing divider.
+It measures the frame's look only. Ticking or unticking a frame's checkbox is not a change (see Storage), so it never enables the button and reverting never undoes it. The state is updated in place rather than by redrawing the dialog, so it stays correct during a slider drag. Put one wherever Blizzard puts theirs, above the closing divider.
 
 An `actions` row is a dropdown that *does* something rather than holding a value: the entry you pick runs its `OnClick` and the button goes on reading its placeholder, because what you chose happened rather than became true. It has no `key` and is skipped wherever values are read or written, and it greys itself out when the list comes back empty. Build the list with a function rather than a table whenever it can change while the dialog is open.
 
@@ -140,16 +140,19 @@ storage["1:Raiding"] = {
 
 An entry in use is what the panel checkbox reflects. Unticking does not delete the entry but marks it `inactive = true`, so the layout keeps its look parked and ticking again brings it back rather than capturing whatever the frame happens to be wearing by then. A layout with no entry in use hands the frame back through `RestoreOwnSettings`, as described above.
 
+Ticking and unticking take effect at once, the way Blizzard's own checkboxes on the edit mode panel do. They do not light up Save, and neither Revert All nor leaving without saving undoes them. Only a change to the frame's position or settings is a change. Unticking a frame with unsaved edits parks them along with the look, so Save still stores them and reverting still drops them.
+
 Override layouts, the ones the game forces on the player, are never written to. While one is active the panel is greyed out and the frame is left wearing whatever the layout before it set.
 
-Saving while a preset layout is active makes a new layout, and the edits made in the preset go to it while the preset goes back to what it was. An *imported* layout is built from a string that carries nothing of this library's, so it starts out owning nothing rather than inheriting the edits that happened to be open at the time.
+Preset layouts are read only, as they are for Blizzard's own systems. During an edit mode session a frame can be ticked and edited on a preset, but saving makes a new layout: the tick and the edits go to it and the preset is never written. A tick alone on a preset lasts only until edit mode closes. Outside edit mode `CanManage` is false on a preset and `SetManaged` refuses, because there is no session to carry the change into a new layout. Any entry left over for a preset from before this was enforced is dropped on registration. An *imported* layout is built from a string that carries nothing of this library's, so it starts out owning nothing rather than inheriting the edits that happened to be open at the time.
 
 ## API
 
 | Function | Purpose |
 | --- | --- |
 | `LLS:IsSupported()` | whether this client has an edit mode |
-| `LLS:CanManage()` | whether the active layout is one a frame can be given to, false under an override layout |
+| `LLS:CanManage()` | whether the active layout is one a frame can be given to, false under an override layout and, outside edit mode, under a preset |
+| `LLS:IsPresetActive()` | whether one of Blizzard's preset layouts is active, to tell the player why `CanManage` is false |
 | `LLS:RegisterFrame(key, info)` | register a frame, see above |
 | `LLS:UnregisterFrame(key)` | remove a registration |
 | `LLS:Refresh([key])` | re-apply the active layout, after changing something behind the library's back |
@@ -197,7 +200,7 @@ bash tests/run.sh
 
 runs every test with whichever Lua is installed, 5.1 or later or LuaJIT, against a stubbed client in `tests/stubs.lua`:
 
-- `session_test.lua` - saving, cancelling, Revert All, reverting one frame, a new layout made by saving on a preset, importing, renaming, deleting, the parked look and switching layouts.
+- `session_test.lua` - saving, cancelling, Revert All, reverting one frame, ticking not being a change, presets being read only, a new layout made by saving on a preset, importing, renaming, deleting, the parked look and switching layouts.
 - `copy_from_test.lua` - which layouts are offered as a source, what a copy brings across and leaves alone, the action row, and malformed rows being refused.
 
 The stubbed edit mode manager copies the order in which Blizzard calls things, because the library's behaviour depends on it. Whether Blizzard still calls things that way is what `blizzard_compat.sh` checks, in a checkout of [wow-ui-source](https://github.com/Gethe/wow-ui-source):

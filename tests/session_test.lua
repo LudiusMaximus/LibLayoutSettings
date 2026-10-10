@@ -1,6 +1,7 @@
 -- The edit mode session against Blizzard's real call sequences: saving,
--- cancelling, Revert All, reverting one frame, a new layout made by saving on a
--- preset, importing, renaming, deleting, the parked look and switching layouts.
+-- cancelling, Revert All, reverting one frame, ticking not being a change,
+-- presets being read only, a new layout made by saving on a preset, importing,
+-- renaming, deleting, the parked look and switching layouts.
 --
 -- The edit mode manager below copies the order in which Blizzard_EditMode calls
 -- things, because the library's correctness depends on that order: MakeNewLayout
@@ -106,7 +107,19 @@ function M:SelectLayout(layoutIndex)
   end
 end
 
+-- Blizzard hands the Revert All Changes button a closure over RevertAllChanges
+-- when it loads, so the button calls the original and never a hook on it.
+M.RevertAllChangesButton = Stub()
+do
+  local revert = M.RevertAllChanges
+  M.RevertAllChangesButton:SetScript("OnClick", function() revert(M) end)
+end
+
 local function EnterEditMode() Trigger("EditMode.Enter") end
+local function ClickRevertAll()
+  M.RevertAllChangesButton:GetScript("OnClick")(M.RevertAllChangesButton)
+  NextFrame()
+end
 local function ExitAndSave() M:SaveLayouts(); Trigger("EditMode.Exit") end
 local function ExitAndDiscard() M:RevertAllChanges(); Trigger("EditMode.Exit") end
 local function Switch(i) M:SelectLayout(i); NextFrame() end
@@ -199,8 +212,7 @@ Check("and the stored one never changed", storage["1:A"].settings.width == 555)
 print("== Revert All, staying in edit mode ==")
 EnterEditMode()
 Edit("width", 888)
-M:RevertAllChanges()
-RunTimers()
+ClickRevertAll()
 Check("the bar goes back", bar.width == 555)
 Check("nothing left to revert", not LLS:HasChanges("Bar"))
 Check("still in edit mode on A", LLS:IsManaged("Bar"))
@@ -212,13 +224,28 @@ LLS:RevertFrame("Bar")
 Check("the colour goes back", bar.color == "blue")
 Check("and there is nothing left", not LLS:HasChanges("Bar"))
 
-print("== unticking is a change Revert All undoes ==")
+print("== ticking is not a change, and no revert undoes it ==")
+M.hasActiveChanges = false
 LLS:SetManaged("Bar", false)
 Check("unticked hands the bar back", bar.width == 300 and not LLS:IsManaged("Bar"))
-M:RevertAllChanges()
-RunTimers()
-Check("the tick comes back", LLS:IsManaged("Bar"))
-Check("with the layout's look", bar.width == 555)
+Check("without lighting the save button", not M.hasActiveChanges)
+Check("and is kept at once, parked", storage["1:A"].inactive and storage["1:A"].settings.width == 555)
+ClickRevertAll()
+Check("Revert All leaves it unticked", not LLS:IsManaged("Bar") and bar.width == 300)
+Trigger("EditMode.Exit")
+EnterEditMode()                            -- a session that finds A parked
+LLS:SetManaged("Bar", true)
+Check("ticking again brings the look back", bar.width == 555 and not storage["1:A"].inactive)
+Check("still without lighting the save button", not M.hasActiveChanges)
+Edit("width", 560)
+ClickRevertAll()
+Check("Revert All returns to the look the tick brought", bar.width == 555 and LLS:IsManaged("Bar"))
+Edit("width", 560)
+LLS:SetManaged("Bar", false)
+Check("unticking over an edit keeps it a change", M.hasActiveChanges and LLS:HasChanges("Bar"))
+ClickRevertAll()
+LLS:SetManaged("Bar", true)
+Check("which reverting drops", bar.width == 555)
 Trigger("EditMode.Exit")
 
 print("== ticking a layout that owned nothing, then discarding ==")
@@ -226,22 +253,52 @@ Switch(3)                                  -- B
 Check("B shows the bar's own settings", bar.width == 300)
 EnterEditMode()
 LLS:SetManaged("Bar", true)
+Check("B owns the bar at once", storage["1:B"] and not storage["1:B"].inactive)
+Check("with nothing for the frame's own revert button to undo", not LLS:HasChanges("Bar"))
 Edit("width", 999)
 ExitAndDiscard()
-Check("handed back to its own settings", bar.width == 300)
-Check("and B owns nothing", storage["1:B"] == nil)
+Check("the edit is gone", bar.width == 300)
+Check("but the tick stays", LLS:IsManaged("Bar") and storage["1:B"].settings.width == 300)
+LLS:SetManaged("Bar", false)               -- from the settings menu
 -- The real test of "handed back": no override is left behind, so a later change
 -- to the user's own settings shows through.
-Check("no override pinned on the way", next(over) == nil)
+Check("unticked, no override is left pinned", next(over) == nil)
 own.width = 350
 Check("so a later change of the user's own shows", bar.width == 350)
 own.width = 300
 
-print("== saving under a preset makes a new layout ==")
+print("== a preset is read only outside edit mode ==")
 Switch(1)                                  -- Modern
+Check("nothing can be given to it", not LLS:CanManage())
+Check("and the addon can tell why", LLS:IsPresetActive())
+LLS:SetManaged("Bar", true)                -- from the settings menu
+Check("so ticking is refused", storage["0:Modern"] == nil and not LLS:IsManaged("Bar"))
+
+print("== on a preset, a tick alone is not a change ==")
+EnterEditMode()
+Check("in edit mode it can be ticked", LLS:CanManage())
+M.hasActiveChanges = false
+LLS:SetManaged("Bar", true)
+Check("ticking does not light the save button", not M.hasActiveChanges)
+Check("nor writes the preset", storage["0:Modern"] == nil)
+Edit("width", 432)
+Check("an edit does", M.hasActiveChanges)
+ClickRevertAll()
+Check("Revert All drops the edit", bar.width == 300)
+Check("and keeps the tick", LLS:IsManaged("Bar"))
+ExitAndDiscard()
+Check("leaving drops the tick with the session", not LLS:IsManaged("Bar") and storage["0:Modern"] == nil)
+Check("and pins no override", next(over) == nil)
+
+print("== saving under a preset makes a new layout ==")
 EnterEditMode()
 LLS:SetManaged("Bar", true)
 Edit("width", 444)
+-- Blizzard saves for a rename or deletion elsewhere as well, and leaves the edits
+-- made on a preset unsaved when it does.
+M:SaveLayouts()
+Check("such a save writes nothing to the preset", storage["0:Modern"] == nil)
+Check("and the edit stays pending", LLS:HasChanges("Bar"))
 -- Look inside the sequence: Blizzard saves between reverting and creating, and
 -- the preset's entry must not take the edits even for that moment.
 local midway
