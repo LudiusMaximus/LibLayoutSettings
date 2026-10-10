@@ -15,6 +15,7 @@ So this library never touches Blizzard's layout data. It only reads which layout
 - Dragging the frame by that glow, and nudging it a pixel at a time with the arrow keys, ten at a time with shift held.
 - A settings dialog of slider, checkbox, dropdown, colour, text, button, separator, revert, reset position and action rows.
 - Copying one layout's stored look onto another.
+- The same rows drawn onto a settings page of the addon's own, for changing the frame outside edit mode.
 - Save, cancel and revert semantics that match Blizzard's, including creating a new layout when saving while a preset layout is active.
 
 Frame snapping and magnetism are deliberately left out.
@@ -48,6 +49,10 @@ LLS:RegisterFrame("MyBar", {
 
   -- optional, what a resetPosition row puts back and measures against
   GetDefaultPosition = function() return defaults.p, defaults.rp, defaults.x, defaults.y end,
+
+  -- needed only for CreateSettingsFrame, see "A settings page" below
+  EditSetting  = function(key, value) MyAddon:SetSetting(key, value) end,
+  EditPosition = function(point, relativePoint, x, y) ... end,
 
   OnChanged     = function() MyAddon:UpdateLook() end,  -- optional, after any change
   OnPreview     = function(shown) ... end,              -- optional, show a dummy while editing
@@ -163,6 +168,7 @@ Preset layouts are read only, as they are for Blizzard's own systems. During an 
 | `LLS:GetActiveLayoutName()` | the active layout's name, for naming it in your own UI |
 | `LLS:GetStoredLayouts(key)` | the other layouts holding a look for this frame, as `{key =, name =}` |
 | `LLS:CopyFrom(key, sourceKey)` | put another layout's stored look onto this frame |
+| `LLS:CreateSettingsFrame(key, parent[, opener])` | draw the frame's rows onto a settings page of your own, see below |
 | `LLS:SelectFrame(key)` | open the settings dialog for a frame, as clicking its glow does |
 | `LLS:ClearSelection()` | close it again |
 | `LLS:SetManaged(key, managed)` | tick or untick the panel checkbox for the active layout |
@@ -173,7 +179,15 @@ Preset layouts are read only, as they are for Blizzard's own systems. During an 
 
 An addon that also lets the player change these settings elsewhere, from a context menu say, has to call `LLS:Capture(key)` afterwards. Otherwise the layout owning the frame puts its own value back the next time it is applied, and the change appears to be silently discarded.
 
-`Capture` only touches a layout that already owns the frame, so a player who never ticked a checkbox is unaffected and the addon's settings keep behaving exactly as they did before. Layouts that were deliberately given their own settings keep them.
+`Capture` only touches a layout that already owns the frame, so a player who never ticked a checkbox is unaffected and the addon's settings keep behaving exactly as they did before. Layouts that were deliberately given their own settings keep them. It also redraws a settings page showing the frame, so call it after a change of the addon's own whether or not a layout owns the frame.
+
+### A settings page
+
+`LLS:CreateSettingsFrame(key, parent[, opener])` draws the rows the edit mode dialog shows onto a frame of your own, a page in the game's AddOns settings say. It returns a frame as wide as the dialog, whose height follows its rows, for you to anchor. The rows are drawn when it is first shown and whenever `Capture` reports a change, but never under a control that is being used.
+
+Outside edit mode there is no session to hold a change, so a change on the page goes through `EditSetting` and `EditPosition` instead of `SetSetting` and `SetPosition`: the way a change from the addon's own settings UI goes, to the layout while it owns the frame and to the addon's own settings otherwise. The library calls `OnChanged` and `Capture` after it. Nothing on the page lights up edit mode's Save.
+
+The rows work as they do in the dialog, with one difference: a `revert` row puts back how the frame looked when the page was last opened, since there is no session to measure against. Opening is the returned frame being shown, unless you pass `opener`, the frame whose showing counts instead. Pass your whole settings page there if you hide and show the rows while it is open, so that doing so does not move the point Revert goes back to. Rows that are buttons or actions run the addon's own code, which should end in `Capture` as any change of its own does. `CopyFrom` called from the page goes through `EditSetting` and `EditPosition` too.
 
 ## Embedding
 
@@ -202,6 +216,7 @@ runs every test with whichever Lua is installed, 5.1 or later or LuaJIT, against
 
 - `session_test.lua` - saving, cancelling, Revert All, reverting one frame, ticking not being a change, presets being read only, a new layout made by saving on a preset, importing, renaming, deleting, the parked look and switching layouts.
 - `copy_from_test.lua` - which layouts are offered as a source, what a copy brings across and leaves alone, the action row, and malformed rows being refused.
+- `page_test.lua` - the rows on a settings page: where a change goes, Revert Changes and what counts as opening the page, redrawing, Copy From and Reset Position outside edit mode.
 
 The stubbed edit mode manager copies the order in which Blizzard calls things, because the library's behaviour depends on it. Whether Blizzard still calls things that way is what `blizzard_compat.sh` checks, in a checkout of [wow-ui-source](https://github.com/Gethe/wow-ui-source):
 

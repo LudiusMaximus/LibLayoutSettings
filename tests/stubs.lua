@@ -49,6 +49,26 @@ local recorders = {
   IsMouseEnabled = function(self) return slot(self).mouseEnabled == true end,
   IsMouseOver = function(self) return slot(self).mouseOver == true end,
   GetChildren = function(self) return unpack(slot(self).children or {}) end,
+  -- Shown only once Show is called, and Show and Hide run the scripts a real
+  -- frame would. Parents are not followed, so visible means shown.
+  Show = function(self)
+    local s = slot(self)
+    if not s.shown then
+      s.shown = true
+      if s.scripts.OnShow then s.scripts.OnShow(self) end
+    end
+  end,
+  Hide = function(self)
+    local s = slot(self)
+    if s.shown then
+      s.shown = false
+      if s.scripts.OnHide then s.scripts.OnHide(self) end
+    end
+  end,
+  IsShown = function(self) return slot(self).shown == true end,
+  IsVisible = function(self) return slot(self).shown == true end,
+  -- The slider's change callback, kept so the test can move the slider.
+  RegisterCallback = function(self, _, fn) slot(self).callback = fn end,
   -- The menu generator, kept so the test can open the dropdown.
   SetupMenu = function(self, generator) slot(self).generator = generator end,
   GetGenerator = function(self) return slot(self).generator end,
@@ -59,6 +79,9 @@ StubMT = {
   __index = function(t, k)
     local recorder = recorders[k]
     if recorder then return recorder end
+    -- The library's own fields on a frame are nil until it sets them, as on a
+    -- real frame, and the library tells a dialog from a page by them.
+    if type(k) == "string" and k:sub(1, 3) == "lib" then return nil end
     local v = setmetatable({}, StubMT)
     rawset(t, k, v)
     return v

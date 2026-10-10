@@ -18,6 +18,7 @@ What the library provides:
   - a settings dialog of slider, checkbox, dropdown, colour, text, button,
     separator, revert, reset position and action rows,
   - copying one layout's stored look onto another,
+  - the same rows on a settings page of the addon's own, outside edit mode,
   - save, cancel and revert semantics that match Blizzard's, including creating a
     new layout when saving while a preset layout is active.
 
@@ -47,6 +48,8 @@ if not lib then return end
 -- Kept across library upgrades.
 lib.registrations = lib.registrations or {}
 lib.order = lib.order or {}
+-- Every frame CreateSettingsFrame has drawn rows into.
+lib.pages = lib.pages or {}
 
 local registrations = lib.registrations
 local order = lib.order
@@ -263,13 +266,26 @@ local function IsInDefaultPosition(info)
     and floor((currentY or 0) + 0.5) == floor(y + 0.5)
 end
 
+-- A settings page measures against how the frame looked when the page was
+-- opened, because outside edit mode there is no session to measure against.
+local function PageHasChanges(page)
+  return page.libSnapshot ~= nil and not SameValue(CaptureEntry(page.libInfo), page.libSnapshot)
+end
+
+-- What a revert row on this host has to undo.
+local function HostHasChanges(host, info)
+  if host.libPage then
+    return PageHasChanges(host)
+  end
+  return HasChanges(info)
+end
+
 -- The revert row and the reset position row each enable themselves only while
 -- there is something to undo, the way Blizzard's own buttons do. Updated in place
--- rather than by redrawing the dialog, because a slider drag would redraw on
--- every frame, and so would holding an arrow key down.
-local function RefreshButtonStates()
-  local dialog = lib.dialog
-  local rows = dialog and dialog.rows
+-- rather than by redrawing, because a slider drag would redraw on every frame,
+-- and so would holding an arrow key down.
+local function RefreshHostButtonStates(host)
+  local rows = host and host.rows
   if not rows then
     return
   end
@@ -278,7 +294,7 @@ local function RefreshButtonStates()
   for index = 1, (pool and pool.used or 0) do
     local row = pool[index]
     if row.libInfo then
-      row:SetEnabled(HasChanges(row.libInfo))
+      row:SetEnabled(HostHasChanges(host, row.libInfo))
     end
   end
 
@@ -288,6 +304,13 @@ local function RefreshButtonStates()
     if row.libInfo then
       row:SetEnabled(not IsInDefaultPosition(row.libInfo))
     end
+  end
+end
+
+local function RefreshButtonStates()
+  RefreshHostButtonStates(lib.dialog)
+  for _, page in ipairs(lib.pages) do
+    RefreshHostButtonStates(page)
   end
 end
 
@@ -379,7 +402,7 @@ end
 -- Panel and dialog, built lazily on the first edit mode entry
 --------------------------------------------------------------------------------
 
-local RefreshPanel, RefreshOverlays, RefreshDialog, RefreshLayoutIndex
+local RefreshPanel, RefreshOverlays, RefreshDialog, RefreshLayoutIndex, RefreshPages, RefreshHost
 
 -- One row per registered frame, as tall as Blizzard's own manager checkboxes and
 -- as wide as the longest name needs, so the panel hugs its contents.
@@ -563,26 +586,72 @@ local function SetOverlayBehind(info, overlay, behind)
   end
 end
 
-local function SetRowValue(info, setting, value)
-  info.SetSetting(setting.key, value)
-
-  local entry = CurrentEntry(info)
-  if entry then
-    -- Copied, or the addon's store and the layout's entry would share one table
-    -- and an in place edit on either side would silently change the other.
-    entry.settings[setting.key] = CopyValue(value)
+-- Outside edit mode there is no session to hold a change, so it goes through the
+-- addon the way a change from its own settings UI does, and lands wherever those
+-- land. Capture then folds it into a layout that owns the frame. The page the
+-- change came from is marked while it runs, so that it is not redrawn under the
+-- control being used.
+local function EditThroughAddon(info, edit, page)
+  if page then
+    page.libWriting = true
   end
-
+  edit()
   if info.OnChanged then
     info.OnChanged()
   end
+  lib:Capture(info.key)
+  if page then
+    page.libWriting = false
+  end
+  RefreshButtonStates()
+end
 
-  MarkDirty()
+-- The same look, put on through the addon rather than as a layout's override.
+local function EditEntry(info, entry)
+  local position = entry.position
+  if position and position.point then
+    info.EditPosition(position.point, position.relativePoint, position.x, position.y)
+  end
+  if entry.settings then
+    for _, setting in ipairs(info.settings) do
+      local value = setting.key and entry.settings[setting.key]
+      if value ~= nil then
+        info.EditSetting(setting.key, CopyValue(value))
+      end
+    end
+  end
+end
+
+-- Puts the look back to how it was when the page was opened. Capture redraws the
+-- page on the way, so its rows show the result.
+local function RevertPage(page)
+  EditThroughAddon(page.libInfo, function() EditEntry(page.libInfo, page.libSnapshot) end)
+end
+
+local function SetRowValue(host, info, setting, value)
+  if host.libPage then
+    EditThroughAddon(info, function() info.EditSetting(setting.key, value) end, host)
+  else
+    info.SetSetting(setting.key, value)
+
+    local entry = CurrentEntry(info)
+    if entry then
+      -- Copied, or the addon's store and the layout's entry would share one table
+      -- and an in place edit on either side would silently change the other.
+      entry.settings[setting.key] = CopyValue(value)
+    end
+
+    if info.OnChanged then
+      info.OnChanged()
+    end
+
+    MarkDirty()
+  end
 
   -- Redraws so that any row this one greys out follows immediately. Never set on
   -- a slider, whose value changes on every frame of a drag.
   if setting.refreshOnChange then
-    RefreshDialog()
+    RefreshHost(host)
   end
 end
 
@@ -716,7 +785,7 @@ local function ShowRowTooltip(frame)
   tooltip:ClearAllPoints()
   -- Level with the row, from the offset the row was placed at, rather than from
   -- its rect: a row that has just been shown may not have been laid out yet.
-  tooltip:SetPoint("TOPLEFT", lib.dialog, "TOPRIGHT", tooltipGap, row.libOffsetY or 0)
+  tooltip:SetPoint("TOPLEFT", row.libHost, "TOPRIGHT", tooltipGap, row.libOffsetY or 0)
   GameTooltip_SetTitle(tooltip, title)
   GameTooltip_AddNormalLine(tooltip, text, true)
   tooltip:Show()
@@ -792,8 +861,19 @@ local function ForwardDrag(dialog, row)
   row:HookScript("OnDragStop", function() dialog:StopMovingOrSizing() end)
 end
 
-local function AcquireRow(dialog, kind)
-  local pool = dialog.rows[kind]
+-- One pool of rows per kind, for each frame rows are drawn into.
+local function NewRowPools()
+  local pools = {}
+  for kind in pairs(rowKinds) do
+    pools[kind] = {}
+  end
+  return pools
+end
+
+-- The host is the frame the row is drawn into: the edit mode dialog, or a
+-- settings page from CreateSettingsFrame. A row stays with its host for life.
+local function AcquireRow(host, kind)
+  local pool = host.rows[kind]
   pool.used = (pool.used or 0) + 1
 
   local row = pool[pool.used]
@@ -802,7 +882,7 @@ local function AcquireRow(dialog, kind)
   end
 
   if kind == "text" then
-    row = CreateFrame("Frame", nil, dialog)
+    row = CreateFrame("Frame", nil, host)
     row:SetSize(343, 32)
 
     row.Label = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightMedium")
@@ -847,17 +927,17 @@ local function AcquireRow(dialog, kind)
     end)
 
   elseif kind == "separator" then
-    row = CreateFrame("Frame", nil, dialog)
+    row = CreateFrame("Frame", nil, host)
     row:SetSize(330, 16)
     row.Line = row:CreateTexture(nil, "ARTWORK")
     row.Line:SetTexture([[Interface\FriendsFrame\UI-FriendsFrame-OnlineDivider]])
     row.Line:SetAllPoints()
 
   elseif rowIsButton[kind] then
-    row = CreateFrame("Button", nil, dialog, "EditModeSystemSettingsDialogButtonTemplate")
+    row = CreateFrame("Button", nil, host, "EditModeSystemSettingsDialogButtonTemplate")
 
   elseif kind == "color" then
-    row = CreateFrame("Frame", nil, dialog)
+    row = CreateFrame("Frame", nil, host)
     row:SetSize(343, 32)
 
     -- ColorSwatchTemplate is declared as a Frame, but Blizzard's own
@@ -880,14 +960,17 @@ local function AcquireRow(dialog, kind)
       end
     end)
   else
-    row = CreateFrame("Frame", nil, dialog, rowTemplates[kind])
+    row = CreateFrame("Frame", nil, host, rowTemplates[kind])
   end
   pool[pool.used] = row
+  row.libHost = host
 
   -- Wired once per created row, never per use, because these accumulate.
   if kind ~= "separator" then
     WireTooltip(row, row, rowIsButton[kind] or false)
-    ForwardDrag(dialog, row)
+    if host:IsMovable() then
+      ForwardDrag(host, row)
+    end
     -- The named control first, which is the one the library builds itself and so
     -- the one whose mouse it may switch on, then everything else on the row.
     WireTooltip(row, rowControl[kind] and row[rowControl[kind]], true)
@@ -919,7 +1002,7 @@ local function AcquireRow(dialog, kind)
       end
       owner.libLast = value
 
-      SetRowValue(owner.libInfo, setting, value)
+      SetRowValue(owner.libHost, owner.libInfo, setting, value)
     end, row)
 
   elseif kind == "checkbox" then
@@ -928,7 +1011,7 @@ local function AcquireRow(dialog, kind)
       self.checked = not self.checked
       self.Button:SetChecked(self.checked)
       if self.libSetting and self.libInfo then
-        SetRowValue(self.libInfo, self.libSetting, self.checked)
+        SetRowValue(self.libHost, self.libInfo, self.libSetting, self.checked)
       end
     end
   end
@@ -990,7 +1073,7 @@ local function SetupDropdown(row, info, setting)
           return info.GetSetting(setting.key) == value
         end,
         function(value)
-          SetRowValue(info, setting, value)
+          SetRowValue(row.libHost, info, setting, value)
           row.Dropdown:GenerateMenu()
         end,
         option.value)
@@ -1046,7 +1129,7 @@ local function SetupText(row, info, setting)
 
   local function Apply(text)
     if text ~= info.GetSetting(setting.key) then
-      SetRowValue(info, setting, text)
+      SetRowValue(row.libHost, info, setting, text)
     end
   end
 
@@ -1081,7 +1164,7 @@ local function SetupColor(row, info, setting)
     local function Pick(r, g, b, a)
       local color = { r = r, g = g, b = b, a = a or current.a or 1 }
       Show(color)
-      SetRowValue(info, setting, color)
+      SetRowValue(row.libHost, info, setting, color)
     end
 
     ColorPickerFrame:SetupColorPickerAndShow({
@@ -1165,13 +1248,25 @@ local function NudgeSelection(key)
   return true
 end
 
-local function ResetSelectionPosition(info)
+-- Puts the frame back where the addon says it belongs, as the kind of change the
+-- host makes. Either way the reset position row greys out again once it is back.
+local function ResetPosition(host, info)
   local point, relativePoint, x, y = DefaultPosition(info)
   if not point then
     return
   end
-  CommitPosition(info, point, relativePoint, x, y)
+  if host.libPage then
+    EditThroughAddon(info, function() info.EditPosition(point, relativePoint, x, y) end)
+  else
+    CommitPosition(info, point, relativePoint, x, y)
+  end
 end
+
+-- The dialog's width, which a settings page takes too. Then where its rows start
+-- below its top edge and the room left under the last one: the dialog has its
+-- title above the rows and its border around them, a settings page neither.
+local dialogWidth = 400
+local dialogTop, dialogBottom = 48, 20
 
 local function BuildDialog()
   if lib.dialog then
@@ -1181,7 +1276,7 @@ local function BuildDialog()
   local dialog = CreateFrame("Frame", nil, UIParent)
   dialog:SetFrameStrata("DIALOG")
   dialog:SetFrameLevel(200)
-  dialog:SetWidth(400)
+  dialog:SetWidth(dialogWidth)
   dialog:SetHeight(120)
   dialog:SetPoint("BOTTOMRIGHT", UIParent, "BOTTOMRIGHT", -250, 200)
   dialog:EnableMouse(true)
@@ -1214,26 +1309,22 @@ local function BuildDialog()
     lib:ClearSelection()
   end)
 
-  dialog.rows = { slider = {}, checkbox = {}, dropdown = {}, color = {}, text = {},
-    separator = {}, button = {}, revert = {}, resetPosition = {}, actions = {} }
+  dialog.rows = NewRowPools()
 
   lib.dialog = dialog
   return dialog
 end
 
-local function PopulateDialog(info)
-  local dialog = BuildDialog()
-
-  for _, pool in pairs(dialog.rows) do
+-- Draws every row of a registration into a host, top to bottom.
+local function Populate(host, info, top, bottom)
+  for _, pool in pairs(host.rows) do
     for index = 1, (pool.used or 0) do
       pool[index]:Hide()
     end
     pool.used = 0
   end
 
-  dialog.Title:SetText(info.displayName)
-
-  local offsetY = -48
+  local offsetY = -top
   local lastHeight = 0
 
   local function Place(row, kind, sameRow, padTop)
@@ -1250,9 +1341,9 @@ local function PopulateDialog(info)
 
     row:ClearAllPoints()
     if rowCentred[kind] then
-      row:SetPoint("TOP", dialog, "TOP", 0, offsetY)
+      row:SetPoint("TOP", host, "TOP", 0, offsetY)
     else
-      row:SetPoint("TOPLEFT", dialog, "TOPLEFT", columnOffsets[column], offsetY)
+      row:SetPoint("TOPLEFT", host, "TOPLEFT", columnOffsets[column], offsetY)
     end
     row:Show()
 
@@ -1262,7 +1353,7 @@ local function PopulateDialog(info)
 
   for index, setting in ipairs(info.settings) do
     if rowKinds[setting.type] then
-      local row = AcquireRow(dialog, setting.type)
+      local row = AcquireRow(host, setting.type)
       row.libInfo = info
       row.libSetting = setting
 
@@ -1286,13 +1377,16 @@ local function PopulateDialog(info)
       elseif setting.type == "revert" then
         row:SetText(setting.text or HUD_EDIT_MODE_REVERT_CHANGES)
         row:SetScript("OnClick", function()
-          lib:RevertFrame(info.key)
+          if host.libPage then
+            RevertPage(host)
+          else
+            lib:RevertFrame(info.key)
+          end
         end)
       elseif setting.type == "resetPosition" then
         row:SetText(setting.text or HUD_EDIT_MODE_RESET_POSITION or "Reset Position")
         row:SetScript("OnClick", function()
-          -- Which greys this row out again, by way of MarkDirty.
-          ResetSelectionPosition(info)
+          ResetPosition(host, info)
         end)
       end
 
@@ -1314,7 +1408,7 @@ local function PopulateDialog(info)
       end
 
       if setting.type == "revert" then
-        SetRowEnabled(row, setting.type, HasChanges(info))
+        SetRowEnabled(row, setting.type, HostHasChanges(host, info))
       elseif setting.type == "resetPosition" then
         SetRowEnabled(row, setting.type, not IsInDefaultPosition(info))
       elseif setting.type == "actions" then
@@ -1329,7 +1423,13 @@ local function PopulateDialog(info)
     end
   end
 
-  dialog:SetHeight(-offsetY + 20)
+  host:SetHeight(-offsetY + bottom)
+end
+
+local function PopulateDialog(info)
+  local dialog = BuildDialog()
+  dialog.Title:SetText(info.displayName)
+  Populate(dialog, info, dialogTop, dialogBottom)
 end
 
 
@@ -1459,6 +1559,28 @@ function RefreshDialog()
   end
   if lib.selected then
     PopulateDialog(lib.selected)
+  end
+end
+
+-- Never while the page's own control is changing the value, because redrawing
+-- the row under a slider being dragged would make it lose its grip.
+local function RefreshPage(page)
+  if page:IsVisible() and not page.libWriting then
+    Populate(page, page.libInfo, 0, 0)
+  end
+end
+
+function RefreshPages()
+  for _, page in ipairs(lib.pages) do
+    RefreshPage(page)
+  end
+end
+
+function RefreshHost(host)
+  if host.libPage then
+    RefreshPage(host)
+  else
+    RefreshDialog()
   end
 end
 
@@ -1598,6 +1720,8 @@ function lib:SetManaged(regKey, managed)
   RefreshButtonStates()
   RefreshPanel()
   RefreshOverlays()
+  -- The frame is wearing a different look now, the layout's or its own.
+  RefreshPages()
 end
 
 
@@ -1718,6 +1842,7 @@ local function OnLayoutsUpdated()
   end
 
   ApplyLayout()
+  RefreshPages()
 
   -- A plain revert also lands here with the key unchanged, and must not throw the
   -- pending edits away before ConsumeRevert has had its say.
@@ -2091,6 +2216,15 @@ function lib:UnregisterFrame(regKey)
     end
   end
 
+  -- Its settings pages go with it, rather than drawing a registration that is gone.
+  for index = #lib.pages, 1, -1 do
+    local page = lib.pages[index]
+    if page.libInfo == info then
+      page:Hide()
+      table.remove(lib.pages, index)
+    end
+  end
+
   RefreshPanel()
 end
 
@@ -2115,7 +2249,8 @@ end
 -- Call this when the addon's own settings changed something, so that a layout
 -- owning the frame takes the change on board instead of putting its own value
 -- back the next time it is applied. A layout that does not own the frame is left
--- alone, so a player who never opted in is unaffected.
+-- alone, so a player who never opted in is unaffected. A settings page showing
+-- the frame is redrawn either way.
 function lib:Capture(regKey)
   local info = registrations[regKey]
   if not info then
@@ -2125,27 +2260,28 @@ function lib:Capture(regKey)
   -- A layout that is not using the frame keeps its look parked, and a change made
   -- elsewhere is no reason to disturb it.
   local entry = CurrentEntry(info)
-  if not IsActiveEntry(entry) then
-    return
-  end
+  if IsActiveEntry(entry) then
+    local fresh = CaptureEntry(info)
+    local changed = false
 
-  local fresh = CaptureEntry(info)
-  local changed = false
-
-  for _, field in ipairs({ "position", "settings" }) do
-    for key, value in pairs(fresh[field]) do
-      if not SameValue(entry[field][key], value) then
-        entry[field][key] = CopyValue(value)
-        changed = true
+    for _, field in ipairs({ "position", "settings" }) do
+      for key, value in pairs(fresh[field]) do
+        if not SameValue(entry[field][key], value) then
+          entry[field][key] = CopyValue(value)
+          changed = true
+        end
       end
+    end
+
+    if changed and lib.sessionKey then
+      -- Changed from under an open edit mode, so it is a change to be saved.
+      MarkDirty()
+      RefreshDialog()
     end
   end
 
-  if changed and lib.sessionKey then
-    -- Changed from under an open edit mode, so it is a change to be saved.
-    MarkDirty()
-    RefreshDialog()
-  end
+  -- Whatever changed is on the frame now, and a settings page has to show it.
+  RefreshPages()
 end
 
 --- Puts one frame back the way this edit mode session found it, the way
@@ -2198,7 +2334,9 @@ end
 
 --- Puts another layout's stored look onto this frame, as a change to the layout
 -- that owns it now. The copy is a change like any other: the save button lights
--- up and reverting undoes it. The source is left alone.
+-- up and reverting undoes it. The source is left alone. Outside edit mode, from a
+-- settings page, it goes through EditSetting and EditPosition instead, onto
+-- whatever the frame is wearing.
 function lib:CopyFrom(regKey, sourceKey)
   local info = registrations[regKey]
   if not info or not sourceKey then
@@ -2206,8 +2344,19 @@ function lib:CopyFrom(regKey, sourceKey)
   end
 
   local source = info.storage[sourceKey]
+  if not source then
+    return
+  end
+
+  -- From a settings page, outside edit mode: onto whatever the frame is wearing,
+  -- the way the addon's own settings change it.
+  if not lib.sessionKey and info.EditSetting then
+    EditThroughAddon(info, function() EditEntry(info, source) end)
+    return
+  end
+
   local entry = CurrentEntry(info)
-  if not source or not IsActiveEntry(entry) then
+  if not IsActiveEntry(entry) then
     return
   end
 
@@ -2223,6 +2372,56 @@ function lib:CopyFrom(regKey, sourceKey)
   ApplyEntry(info, entry)
   MarkDirty()
   RefreshDialog()
+end
+
+--- Draws the frame's settings rows into a frame of the addon's own, a settings
+-- page say, so that they can be changed outside edit mode too. They are the rows
+-- the edit mode dialog shows, built from the same descriptors. A change goes
+-- through the registration's EditSetting and EditPosition, the way one from the
+-- addon's own settings UI does, rather than into a layout. The revert row puts
+-- back how the frame looked when the page was last opened.
+-- @param regKey  the registration
+-- @param parent  the frame to draw into
+-- @param opener  optional, the frame whose showing counts as opening the page,
+--                for rows the addon hides and shows again while the page is
+--                open. Defaults to the frame returned.
+-- @return a frame as wide as the dialog whose height follows its rows, for the
+--         caller to anchor, or nil on a client without an edit mode
+function lib:CreateSettingsFrame(regKey, parent, opener)
+  local info = registrations[regKey]
+  assert(info, MAJOR .. ": " .. tostring(regKey) .. " is not registered.")
+  assert(type(info.EditSetting) == "function" and type(info.EditPosition) == "function",
+    MAJOR .. ": a settings frame needs EditSetting and EditPosition in the registration.")
+  if not IsSupported() then
+    return nil
+  end
+
+  local page = CreateFrame("Frame", nil, parent)
+  page:SetWidth(dialogWidth)
+  page.rows = NewRowPools()
+  page.libPage = true
+  page.libInfo = info
+
+  -- Opening sets the point Revert Changes goes back to. Showing the rows only
+  -- draws them, so rows hidden and shown again keep that point.
+  local function Open()
+    page.libSnapshot = CaptureEntry(info)
+    RefreshButtonStates()
+  end
+  -- Set before the hook, because setting would replace it when the page is its
+  -- own opener.
+  page:SetScript("OnShow", RefreshPage)
+  opener = opener or page
+  opener:HookScript("OnShow", Open)
+
+  -- Created on a page that is already up gets no OnShow for being created.
+  if opener:IsVisible() then
+    Open()
+  end
+  RefreshPage(page)
+
+  lib.pages[#lib.pages + 1] = page
+  return page
 end
 
 --- Returns true while the frame's position and settings are owned by the layout.
