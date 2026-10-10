@@ -1,0 +1,7 @@
+## Interface: 120100, 16001, 50504, 20506, 11509
+## Version: @project-version@
+## Title: LibLayoutSettings
+## Author: LudiusMaximus
+## Notes: Per-layout settings and position for your addon's frames, stored for you, with edit mode's own save and revert behaviour.
+
+LibLayoutSettings.lua
