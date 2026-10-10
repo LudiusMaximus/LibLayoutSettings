@@ -187,6 +187,28 @@ externals:
         url: https://github.com/LudiusMaximus/LibLayoutSettings
 ```
 
+## Tests
+
+The `tests` folder holds checks that run outside the game. Packagers leave it out, through the `ignore` list in `.pkgmeta`.
+
+```sh
+bash tests/run.sh
+```
+
+runs every test with whichever Lua is installed, 5.1 or later or LuaJIT, against a stubbed client in `tests/stubs.lua`:
+
+- `session_test.lua` - saving, cancelling, Revert All, reverting one frame, a new layout made by saving on a preset, importing, renaming, deleting, the parked look and switching layouts.
+- `copy_from_test.lua` - which layouts are offered as a source, what a copy brings across and leaves alone, the action row, and malformed rows being refused.
+
+The stubbed edit mode manager copies the order in which Blizzard calls things, because the library's behaviour depends on it. Whether Blizzard still calls things that way is what `blizzard_compat.sh` checks, in a checkout of [wow-ui-source](https://github.com/Gethe/wow-ui-source):
+
+```sh
+bash tests/blizzard_compat.sh ../wow-ui-source                          # every other client against retail
+bash tests/blizzard_compat.sh ../wow-ui-source origin/live~1 origin/live  # what the latest patch changed
+```
+
+It reads what the library uses straight out of `LibLayoutSettings.lua`, so a newly hooked method or a new template is covered without editing the script. Anything missing fails it. A changed method body is only reported, since not every change matters, but when one is, the stub in `session_test.lua` may need the same change.
+
 ## License
 
 MIT

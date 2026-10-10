@@ -1,0 +1,9 @@
+# LibLayoutSettings has no externals of its own. It needs LibStub, which the addon
+# embedding it already provides.
+#
+# The tests only run outside the game, so they are left out of every package. The
+# BigWigs packager reads this list for an external as well, not only for a
+# project's own files, so it applies to every addon that embeds the library.
+
+ignore:
+    - tests
