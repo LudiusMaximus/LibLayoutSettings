@@ -7,6 +7,34 @@
 
 local unpack = table.unpack or unpack
 
+--------------------------------------------------------------------------------
+-- Watchdog
+--------------------------------------------------------------------------------
+-- A test that loops for ever must not be able to take the machine with it: one
+-- stuck in a loop that kept allocating once ran on unnoticed, filled all memory
+-- and the pagefile, and froze Windows. So every test stops itself well short of
+-- that. os.exit rather than error, because an error could be caught by a pcall
+-- and the loop would go on. Each test takes about a second and a few megabytes.
+
+local memoryLimitKB = 256 * 1024
+local cpuLimitSeconds = 30
+
+debug.sethook(function()
+  local reason
+  if collectgarbage("count") > memoryLimitKB then
+    reason = string.format("more than %d MB of memory", memoryLimitKB / 1024)
+  elseif os.clock() > cpuLimitSeconds then
+    reason = string.format("more than %d seconds", cpuLimitSeconds)
+  end
+  if reason then
+    debug.sethook()
+    io.stderr:write("WATCHDOG: test stopped after using " .. reason .. "\n"
+      .. debug.traceback("", 2) .. "\n")
+    io.stderr:flush()
+    os.exit(3)
+  end
+end, "", 100000)
+
 -- This folder, and the library one level up, wherever the repository is checked out.
 local here = (debug.getinfo(1, "S").source:sub(2):match("^(.*)[/\\]") or ".")
 
@@ -82,6 +110,9 @@ StubMT = {
     -- The library's own fields on a frame are nil until it sets them, as on a
     -- real frame, and the library tells a dialog from a page by them.
     if type(k) == "string" and k:sub(1, 3) == "lib" then return nil end
+    -- Nor does a frame have numbered entries. Inventing them would make ipairs
+    -- over a stub run for ever, a new table at every index.
+    if type(k) == "number" then return nil end
     local v = setmetatable({}, StubMT)
     rawset(t, k, v)
     return v

@@ -212,7 +212,7 @@ The `tests` folder holds checks that run outside the game. Packagers leave it ou
 bash tests/run.sh
 ```
 
-runs every test with whichever Lua is installed, 5.1 or later or LuaJIT, against a stubbed client in `tests/stubs.lua`:
+runs every test with whichever Lua is installed, 5.1 or later or LuaJIT, against a stubbed client in `tests/stubs.lua`. A test that runs away stops itself at 256 MB or 30 seconds, by way of a watchdog in `stubs.lua`, and `run.sh` gives each one 60 seconds at most:
 
 - `session_test.lua` - saving, cancelling, Revert All, reverting one frame, ticking not being a change, presets being read only, a new layout made by saving on a preset, importing, renaming, deleting, the parked look and switching layouts.
 - `copy_from_test.lua` - which layouts are offered as a source, what a copy brings across and leaves alone, the action row, and malformed rows being refused.
