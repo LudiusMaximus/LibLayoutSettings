@@ -1315,6 +1315,25 @@ local function BuildDialog()
   return dialog
 end
 
+-- A button's label that is too long for it, as some translations are on a
+-- paired button, is scaled down to fit rather than spilling over its edges, the
+-- way Blizzard's AutoScalingFontStringMixin does it. buttonTextInset keeps it off
+-- the rounded ends.
+local buttonTextInset = 8
+
+local function FitButtonText(button)
+  local text = button:GetFontString()
+  if not (text and text.SetTextScale) then
+    return
+  end
+  text:SetTextScale(1)
+  local room = button:GetWidth() - 2 * buttonTextInset
+  local width = text:GetUnboundedStringWidth()
+  if width > room and room > 0 then
+    text:SetTextScale(room / width)
+  end
+end
+
 -- Draws every row of a registration into a host, top to bottom.
 local function Populate(host, info, top, bottom)
   for _, pool in pairs(host.rows) do
@@ -1405,6 +1424,9 @@ local function Populate(host, info, top, bottom)
       -- alone, the label above having already narrowed them.
       if type(row.libWidth) == "number" and row.libWidth > 0 then
         row:SetWidth(paired and pairedRowWidth or row.libWidth)
+      end
+      if rowIsButton[setting.type] then
+        FitButtonText(row)
       end
 
       if setting.type == "revert" then
