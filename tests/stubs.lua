@@ -95,8 +95,14 @@ local recorders = {
   end,
   IsShown = function(self) return slot(self).shown == true end,
   IsVisible = function(self) return slot(self).shown == true end,
-  -- The slider's change callback, kept so the test can move the slider.
-  RegisterCallback = function(self, _, fn) slot(self).callback = fn end,
+  -- Callbacks by event, and the last one registered, which for a slider is its
+  -- change callback, kept so the test can move the slider.
+  RegisterCallback = function(self, event, fn)
+    local s = slot(self)
+    s.callbacks = s.callbacks or {}
+    s.callbacks[event] = fn
+    s.callback = fn
+  end,
   -- The menu generator, kept so the test can open the dropdown.
   SetupMenu = function(self, generator) slot(self).generator = generator end,
   GetGenerator = function(self) return slot(self).generator end,
@@ -121,8 +127,12 @@ StubMT = {
 }
 local function Stub() return setmetatable({}, StubMT) end
 
+-- Every frame made, so that a test can find one the library keeps to itself.
+local frames = {}
+
 CreateFrame = function(_, _, parent)
   local frame = Stub()
+  frames[#frames + 1] = frame
   if parent then
     local parentSlot = slot(parent)
     parentSlot.children = parentSlot.children or {}
@@ -138,6 +148,7 @@ SOUNDKIT = Stub()
 ADDONS = "AddOns"
 CreateMinimalSliderFormatter = function() return function(v) return v end end
 MinimalSliderWithSteppersMixin = { Label = { Right = 2 }, Event = { OnValueChanged = "OnValueChanged" } }
+DropdownButtonMixin = { Event = { OnMenuOpen = "OnMenuOpen", OnMenuClose = "OnMenuClose" } }
 EditModeSystemSelectionMixin = {}
 HUD_EDIT_MODE_REVERT_CHANGES = "Revert Changes"
 HUD_EDIT_MODE_RESET_POSITION = "Reset Position"
@@ -205,7 +216,7 @@ setmetatable(LibStub, { __call = function(self, major) return self:GetLibrary(ma
 --------------------------------------------------------------------------------
 
 -- Shared with every test file that loads this one.
-STUB = { Stub = Stub, slot = slot, tip = tip, timers = timers, Trigger = Trigger, here = here }
+STUB = { Stub = Stub, slot = slot, tip = tip, timers = timers, Trigger = Trigger, here = here, frames = frames }
 
 -- Loads the library itself, from the repository this file is part of.
 function STUB.LoadLibrary()

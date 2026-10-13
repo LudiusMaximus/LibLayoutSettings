@@ -791,6 +791,11 @@ local function ShowRowTooltip(frame)
   tooltip:Show()
 end
 
+-- The menu a dropdown row has open, nil while it has none.
+local function OpenMenuOf(row)
+  return row.Dropdown and row.Dropdown.menu
+end
+
 local function HideRowTooltip(frame)
   local row = RowOf(frame)
   if not row then
@@ -800,8 +805,13 @@ local function HideRowTooltip(frame)
   -- Leaving the control for the label it belongs to has not left the row, and
   -- the row's own OnEnter will not fire again for a move that never left it - a
   -- control like ColorSwatchTemplate propagates its mouse input, so the row had
-  -- the mouse throughout. Only leaving the row puts the tooltip away.
+  -- the mouse throughout. Only leaving the row puts the tooltip away, and leaving
+  -- the dropdown for the menu it opened has not left it either.
   if row.IsMouseOver and row:IsMouseOver() then
+    return
+  end
+  local menu = OpenMenuOf(row)
+  if menu and menu:IsMouseOver() then
     return
   end
 
@@ -809,6 +819,32 @@ local function HideRowTooltip(frame)
   if tooltip:GetOwner() == row then
     tooltip:Hide()
   end
+end
+
+-- A dropdown's menu opens off the row, and once the mouse is in it the row hears
+-- nothing more: its OnLeave has fired, or never will if the menu lies over the
+-- row's own rect. So while a row's menu is open, the tooltip is kept in step by
+-- watching the mouse: up while it is over the row or the menu, away while it is
+-- over neither, and back when it returns.
+local menuWatcher = CreateFrame("Frame")
+menuWatcher:Hide()
+
+menuWatcher:SetScript("OnUpdate", function(self)
+  local row = self.libRow
+  local menu = row and OpenMenuOf(row)
+  if not menu then
+    self.libRow = nil
+    self:Hide()
+  elseif row:IsMouseOver() or menu:IsMouseOver() then
+    ShowRowTooltip(row)
+  else
+    HideRowTooltip(row)
+  end
+end)
+
+local function WatchMenuOf(row)
+  menuWatcher.libRow = row
+  menuWatcher:Show()
 end
 
 -- Hovering a child does not reach its parent in this UI, so the control is wired
@@ -1016,6 +1052,21 @@ local function AcquireRow(host, kind)
     end
   end
 
+  if kind == "dropdown" or kind == "actions" then
+    -- The row's tooltip follows the menu while it is open. See menuWatcher.
+    row.Dropdown:RegisterCallback(DropdownButtonMixin.Event.OnMenuOpen, function()
+      WatchMenuOf(row)
+    end, row)
+    -- An option being tried on is given up when the menu closes, whether one was
+    -- picked or not. See SetupDropdown.
+    row.Dropdown:RegisterCallback(DropdownButtonMixin.Event.OnMenuClose, function()
+      local setting = row.libSetting
+      if setting and setting.OnHover then
+        setting.OnHover(nil)
+      end
+    end, row)
+  end
+
   return row
 end
 
@@ -1059,24 +1110,36 @@ local function SetupDropdown(row, info, setting)
   local current = info.GetSetting(setting.key)
   local currentText = current ~= nil and tostring(current) or ""
   for _, option in ipairs(options) do
-    if option.value == current then
+    if not option.separator and option.value == current then
       currentText = option.text
       break
     end
   end
   row.Dropdown:SetDefaultText(currentText)
 
+  -- An option is tried on while the mouse rests on it, the way the barber shop
+  -- does, and given up when the mouse moves off it. The menu closing gives it up
+  -- too, wired once per row in AcquireRow. An entry marked separator draws a
+  -- divider instead.
   row.Dropdown:SetupMenu(function(dropdown, rootDescription)
     for _, option in ipairs(options) do
-      rootDescription:CreateRadio(option.text,
-        function(value)
-          return info.GetSetting(setting.key) == value
-        end,
-        function(value)
-          SetRowValue(row.libHost, info, setting, value)
-          row.Dropdown:GenerateMenu()
-        end,
-        option.value)
+      if option.separator then
+        rootDescription:CreateDivider()
+      else
+        local radio = rootDescription:CreateRadio(option.text,
+          function(value)
+            return info.GetSetting(setting.key) == value
+          end,
+          function(value)
+            SetRowValue(row.libHost, info, setting, value)
+            row.Dropdown:GenerateMenu()
+          end,
+          option.value)
+        if setting.OnHover then
+          radio:HookOnEnter(function() setting.OnHover(option.value) end)
+          radio:HookOnLeave(function() setting.OnHover(nil) end)
+        end
+      end
     end
   end)
 

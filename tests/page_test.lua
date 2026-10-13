@@ -38,7 +38,7 @@ local LLS = STUB.LoadLibrary()
 
 -- The addon: its own settings, and a layout's overrides on top of them while the
 -- layout owns the frame, exactly like InFlight's look table.
-local own = { p = "BOTTOM", rp = "TOP", x = 0, y = -170, width = 300, spark = true }
+local own = { p = "BOTTOM", rp = "TOP", x = 0, y = -170, width = 300, spark = true, texture = "Plain" }
 local over = {}
 local function Get(key)
   local value = over[key]
@@ -55,6 +55,8 @@ local function Edit(key, value)
     over[key] = nil
   end
 end
+
+local hovered = {}
 
 local storage = {
   ["1:Raiding"] = {
@@ -75,6 +77,10 @@ local registration = {
   settings = {
     { key = "width", name = "Width", type = "slider", minValue = 40, maxValue = 1000, stepSize = 5 },
     { key = "spark", name = "Spark", type = "checkbox" },
+    -- Records what it is asked to try on, "off" for giving it up.
+    { key = "texture", name = "Texture", type = "dropdown", tooltip = "What fills the bar.",
+      options = { { value = "Plain", text = "Plain" }, { separator = true }, { value = "Shiny", text = "Shiny" } },
+      OnHover = function(value) hovered[#hovered + 1] = value or "off" end },
     { type = "revert" },
     { type = "resetPosition" },
     { type = "actions", name = "Copy From",
@@ -185,6 +191,66 @@ Check("the bar is off its default spot", reset:IsEnabled())
 reset:GetScript("OnClick")()
 Check("it goes back", own.p == "BOTTOM" and own.x == 0 and own.y == -170)
 Check("and the button greys out", not reset:IsEnabled())
+
+print("== an option is tried on while the mouse rests on it ==")
+local dropdown = page.rows.dropdown[1]
+local radios, dividers = {}, 0
+local root = {
+  CreateDivider = function() dividers = dividers + 1 end,
+  CreateRadio = function(_, text, isSelected, setSelected, value)
+    local radio = { text = text, setSelected = setSelected, value = value }
+    function radio:HookOnEnter(fn) self.enter = fn end
+    function radio:HookOnLeave(fn) self.leave = fn end
+    radios[#radios + 1] = radio
+    return radio
+  end,
+}
+slot(dropdown.Dropdown).generator(dropdown.Dropdown, root)
+Check("every option is offered", #radios == 2 and radios[2].text == "Shiny")
+Check("with a divider where the options ask for one", dividers == 1)
+radios[2].enter()
+Check("resting on one tries it on", hovered[#hovered] == "Shiny")
+radios[2].leave()
+Check("moving off it gives it up", hovered[#hovered] == "off")
+Check("and nothing was changed by it", Get("texture") == "Plain")
+radios[2].enter()
+radios[2].setSelected(radios[2].value)
+slot(dropdown.Dropdown).callbacks.OnMenuClose()
+Check("closing the menu gives it up too", hovered[#hovered] == "off")
+Check("while what was picked stays picked", Get("texture") == "Shiny")
+
+print("== a dropdown's tooltip follows its open menu ==")
+local tip = STUB.tip
+local watcher
+for _, frame in ipairs(STUB.frames) do
+  if slot(frame).scripts.OnUpdate then watcher = frame end
+end
+local overMenu = false
+local menu = Stub()
+function menu:IsMouseOver() return overMenu end
+
+slot(dropdown).mouseOver = true
+dropdown:GetScript("OnEnter")(dropdown)
+Check("hovering the row shows its tooltip", tip.shown and tip.owner == dropdown)
+dropdown.Dropdown.menu = menu
+slot(dropdown.Dropdown).callbacks.OnMenuOpen()
+Check("opening the menu starts watching it", watcher and watcher:IsShown())
+
+slot(dropdown).mouseOver, overMenu = false, true
+dropdown:GetScript("OnLeave")(dropdown)
+Check("moving from the row into the menu keeps it", tip.shown)
+overMenu = false
+watcher:GetScript("OnUpdate")(watcher)
+Check("leaving the menu for elsewhere puts it away", not tip.shown)
+overMenu = true
+watcher:GetScript("OnUpdate")(watcher)
+Check("coming back over the menu shows it again", tip.shown and tip.owner == dropdown)
+
+dropdown.Dropdown.menu = false
+slot(dropdown.Dropdown).callbacks.OnMenuClose()
+watcher:GetScript("OnUpdate")(watcher)
+Check("a closed menu is no longer watched", not watcher:IsShown())
+dropdown:GetScript("OnLeave")(dropdown)
 
 print("== opening the page again starts over ==")
 page:Hide()

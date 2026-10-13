@@ -40,7 +40,7 @@ src=$(tr -d '\r' < "$lib")
 methods=$( { printf '%s\n' "$src" | grep -oE 'hooksecurefunc\(EditModeManagerFrame, *"[A-Za-z]+"' | grep -oE '"[A-Za-z]+"' | tr -d '"'
              printf '%s\n' "$src" | grep -oE 'EditModeManagerFrame:[A-Za-z]+\(' | sed -E 's/.*:([A-Za-z]+)\(/\1/'; } | sort -u)
 templates=$(printf '%s\n' "$src" | grep -oE '"[A-Za-z]+Template"' | tr -d '"' | sort -u)
-mixins=$(printf '%s\n' "$src" | grep -oE '\b(EditMode[A-Za-z]*Mixin|MinimalSlider[A-Za-z]*Mixin|CreateMinimalSliderFormatter)\b' | sort -u)
+mixins=$(printf '%s\n' "$src" | grep -oE '\b(EditMode[A-Za-z]*Mixin|MinimalSlider[A-Za-z]*Mixin|DropdownButtonMixin|CreateMinimalSliderFormatter)\b' | sort -u)
 events=$(printf '%s\n' "$src" | grep -oE 'RegisterCallback\("EditMode\.[A-Za-z]+"' | grep -oE 'EditMode\.[A-Za-z]+' | sort -u)
 # Fields read off the manager that are not its methods: child frames.
 children=$(printf '%s\n' "$src" | grep -oE 'EditModeManagerFrame\.[A-Z][A-Za-z]+' | sed 's/.*\.//' | sort -u \
