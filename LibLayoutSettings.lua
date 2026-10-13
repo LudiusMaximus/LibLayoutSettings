@@ -1210,10 +1210,31 @@ local function SetupText(row, info, setting)
   end
 end
 
--- The button a color setting's colorButton puts on Blizzard's colour picker.
--- There is one picker for every addon, so the button is shown only while a picker
--- this library opened asks for it, and goes again as soon as the picker closes or
--- anyone at all sets it up afresh.
+-- There is one colour picker for every addon, so whatever this library adds to
+-- it lasts only while the picker it opened is up: the picker closing, or anyone
+-- at all setting it up afresh, takes the button away and tells the setting its
+-- picker has gone. Hooked once, and kept across library upgrades.
+local function HookPicker()
+  if lib.pickerHooked then
+    return
+  end
+  lib.pickerHooked = true
+
+  local function Closed()
+    if lib.colorButton then
+      lib.colorButton:Hide()
+    end
+    local OnClosed = lib.pickerOnClosed
+    lib.pickerOnClosed = nil
+    if OnClosed then
+      OnClosed()
+    end
+  end
+  ColorPickerFrame:HookScript("OnHide", Closed)
+  hooksecurefunc(ColorPickerFrame, "SetupColorPickerAndShow", Closed)
+end
+
+-- The button a color setting's colorButton puts on the colour picker.
 local function ColorButton()
   if lib.colorButton then
     return lib.colorButton
@@ -1268,15 +1289,13 @@ local function ColorButton()
     GetAppropriateTooltip():Hide()
   end)
 
-  ColorPickerFrame:HookScript("OnHide", function() button:Hide() end)
-  hooksecurefunc(ColorPickerFrame, "SetupColorPickerAndShow", function() button:Hide() end)
-
   lib.colorButton = button
   return button
 end
 
 -- Opens Blizzard's colour picker on picker.color, calling picker.OnPick(r, g, b, a)
--- with every change and with the colour it started from on cancel.
+-- with every change and with the colour it started from on cancel, and
+-- picker.OnPicker with true once it is open and false once it has gone.
 local function ShowColorPicker(picker)
   local color = picker.color or {}
   local hasOpacity = picker.hasOpacity ~= false
@@ -1292,6 +1311,7 @@ local function ShowColorPicker(picker)
     OnPick(r, g, b, ColorPickerFrame:GetColorAlpha())
   end
 
+  HookPicker()
   ColorPickerFrame:SetupColorPickerAndShow({
     r = color.r or 1, g = color.g or 1, b = color.b or 1,
     opacity = color.a or 1,
@@ -1305,9 +1325,14 @@ local function ShowColorPicker(picker)
     end,
   })
 
+  -- Both after setting the picker up, which closes whatever it was open for.
+  if picker.OnPicker then
+    lib.pickerOnClosed = function() picker.OnPicker(false) end
+    picker.OnPicker(true)
+  end
+
   local wanted = picker.colorButton
   if wanted then
-    -- After setting the picker up, which hides the button.
     local button = ColorButton()
     button:SetText(wanted.text)
     button.libColor = { r = wanted.color.r or 1, g = wanted.color.g or 1,
@@ -1332,6 +1357,7 @@ local function SetupColor(row, info, setting)
       color = info.GetSetting(setting.key),
       hasOpacity = setting.hasOpacity,
       colorButton = setting.colorButton,
+      OnPicker = setting.OnPicker,
       -- Handed over as a fresh table every time, so that nothing downstream ends
       -- up holding the same table the layout stored.
       OnPick = function(r, g, b, a)
@@ -2295,7 +2321,7 @@ end
 --- Opens Blizzard's colour picker the way a color row does, its button and
 -- all, for a colour the addon also offers somewhere of its own, a context menu
 -- say. Needs no edit mode, so it works on every client.
--- @param picker  {color =, OnPick =, hasOpacity =, colorButton =}, see README.md
+-- @param picker  {color =, OnPick =, hasOpacity =, colorButton =, OnPicker =}, see README.md
 function lib:ShowColorPicker(picker)
   assert(type(picker) == "table" and type(picker.OnPick) == "function",
     MAJOR .. ": picker.OnPick has to be a function.")

@@ -59,6 +59,7 @@ local function Edit(key, value)
 end
 
 local hovered = {}
+local picking = {}
 
 local storage = {
   ["1:Raiding"] = {
@@ -84,7 +85,8 @@ local registration = {
       options = { { value = "Plain", text = "Plain" }, { separator = true }, { value = "Shiny", text = "Shiny" } },
       OnHover = function(value) hovered[#hovered + 1] = value or "off" end },
     { key = "barcolor", name = "Bar Color", type = "color",
-      colorButton = { text = "White", tooltip = "Untinted.", color = { r = 1, g = 1, b = 1, a = 1 } } },
+      colorButton = { text = "White", tooltip = "Untinted.", color = { r = 1, g = 1, b = 1, a = 1 } },
+      OnPicker = function(open) picking[#picking + 1] = open end },
     { key = "fontcolor", name = "Font Color", type = "color", sameRow = true },
     { type = "revert" },
     { type = "resetPosition" },
@@ -272,6 +274,18 @@ slot(ColorPickerFrame).scripts.OnHide(ColorPickerFrame)
 Check("and so does the picker closing", not button:IsShown())
 fontColor.libOpenPicker()
 Check("a colour without one leaves it hidden", not button:IsShown())
+
+print("== a colour is told when its picker opens and goes ==")
+picking = {}
+barColor.libOpenPicker()
+Check("opening it says so", #picking == 1 and picking[1] == true)
+slot(ColorPickerFrame).scripts.OnHide(ColorPickerFrame)
+Check("and closing it", #picking == 2 and picking[2] == false)
+barColor.libOpenPicker()
+fontColor.libOpenPicker()
+Check("as does another colour taking the picker over", #picking == 4 and picking[4] == false)
+slot(ColorPickerFrame).scripts.OnHide(ColorPickerFrame)
+Check("after which closing is not news to it", #picking == 4)
 
 print("== opening the page again starts over ==")
 page:Hide()
