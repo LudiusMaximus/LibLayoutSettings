@@ -1,8 +1,9 @@
 -- The rows drawn onto a settings page of the addon's own: they are there, a
 -- change goes through the addon to whatever the frame is wearing, Revert Changes
 -- goes back to how the page was opened, a change made elsewhere redraws the page
--- but a change made on it does not, and Copy From and Reset Position work there
--- too. Nothing on the page is an edit mode change.
+-- but a change made on it does not, and Copy From, Reset Position and a colour's
+-- own button on the colour picker work there too. Nothing on the page is an edit
+-- mode change.
 
 local here = debug.getinfo(1, "S").source:sub(2):match("^(.*)[/\\]") or "."
 dofile(here .. "/stubs.lua")
@@ -38,7 +39,8 @@ local LLS = STUB.LoadLibrary()
 
 -- The addon: its own settings, and a layout's overrides on top of them while the
 -- layout owns the frame, exactly like InFlight's look table.
-local own = { p = "BOTTOM", rp = "TOP", x = 0, y = -170, width = 300, spark = true, texture = "Plain" }
+local own = { p = "BOTTOM", rp = "TOP", x = 0, y = -170, width = 300, spark = true, texture = "Plain",
+  barcolor = { r = 0.5, g = 0.5, b = 0.8, a = 0.6 }, fontcolor = { r = 1, g = 1, b = 1, a = 1 } }
 local over = {}
 local function Get(key)
   local value = over[key]
@@ -81,6 +83,9 @@ local registration = {
     { key = "texture", name = "Texture", type = "dropdown", tooltip = "What fills the bar.",
       options = { { value = "Plain", text = "Plain" }, { separator = true }, { value = "Shiny", text = "Shiny" } },
       OnHover = function(value) hovered[#hovered + 1] = value or "off" end },
+    { key = "barcolor", name = "Bar Color", type = "color",
+      colorButton = { text = "White", tooltip = "Untinted.", color = { r = 1, g = 1, b = 1, a = 1 } } },
+    { key = "fontcolor", name = "Font Color", type = "color", sameRow = true },
     { type = "revert" },
     { type = "resetPosition" },
     { type = "actions", name = "Copy From",
@@ -251,6 +256,22 @@ slot(dropdown.Dropdown).callbacks.OnMenuClose()
 watcher:GetScript("OnUpdate")(watcher)
 Check("a closed menu is no longer watched", not watcher:IsShown())
 dropdown:GetScript("OnLeave")(dropdown)
+
+print("== a colour's own button on the colour picker ==")
+local barColor, fontColor = page.rows.color[1], page.rows.color[2]
+barColor.libOpenPicker()
+local button = LLS.colorButton
+Check("opening a colour with one shows it", button and button:IsShown() and button:GetText() == "White")
+button:GetScript("OnClick")(button)
+local picked = Get("barcolor")
+Check("pressing it picks its colour", picked.r == 1 and picked.g == 1 and picked.b == 1 and picked.a == 1)
+ColorPickerFrame:SetupColorPickerAndShow({})
+Check("another addon setting the picker up hides it", not button:IsShown())
+barColor.libOpenPicker()
+slot(ColorPickerFrame).scripts.OnHide(ColorPickerFrame)
+Check("and so does the picker closing", not button:IsShown())
+fontColor.libOpenPicker()
+Check("a colour without one leaves it hidden", not button:IsShown())
 
 print("== opening the page again starts over ==")
 page:Hide()

@@ -92,6 +92,7 @@ Pass `true` to drop one strata below the frame, or a strata name where the frame
 | `actions` | actions | array of `{text =, OnClick =}`, or a function returning one. An entry of `{separator = true}` draws a divider. `OnClick` is passed the registration |
 | `placeholder` | actions | what the button reads when nothing has been picked, defaults to `name` |
 | `hasOpacity` | color | show the opacity slider, defaults to true |
+| `colorButton` | color | optional `{text =, tooltip =, color = {r, g, b, a}}`, a button on the colour picker that picks that colour at a press, with an optional tooltip |
 | `maxLetters` | text | cap on the length, 0 or absent for none |
 | `trim` | text | strip surrounding whitespace on commit |
 
@@ -100,6 +101,8 @@ Blizzard's edit mode has only three kinds of row - `Enum.EditModeSettingDisplayT
 A `text` row reports every keystroke, so the addon can show the change as it is typed, and Escape restores what was there. `trim` is applied only when the box is left or the value confirmed, never while typing - trimming per keystroke would mean a leading space could never be typed, because it would vanish as it was hit. Set `trim` here whenever the addon's own settings trim, or the two will disagree about what was typed.
 
 A `color` setting's value is a table `{r, g, b, a}`. Table-valued settings are deep copied whenever they cross between the addon and a layout, so a layout's stored colour is never the same table the addon is rendering from. Without that every layout would show whichever colour was picked last.
+
+A `colorButton` sits in the picker's free space, above the hex box on retail and below the swatch on the classic picker. It picks through the picker's own controls, so the swatch follows and Cancel still puts back the colour the picker opened with. The picker is shared by every addon, so the button is shown only while a picker this library opened asks for it.
 
 Separators and buttons are entries in the same `settings` list, so they can be ordered freely against the settings. They have no `key` and are skipped wherever values are read or written.
 
@@ -173,8 +176,13 @@ Preset layouts are read only, as they are for Blizzard's own systems. During an 
 | `LLS:SelectFrame(key)` | open the settings dialog for a frame, as clicking its glow does |
 | `LLS:ClearSelection()` | close it again |
 | `LLS:SetManaged(key, managed)` | tick or untick the panel checkbox for the active layout |
+| `LLS:ShowColorPicker(picker)` | open the colour picker as a `color` row does, see below |
 
 `SelectFrame`, `ClearSelection` and `SetManaged` are what the panel and the glow call, exposed so an addon can drive the same thing from its own UI. Anything else on the library table is internal.
+
+### The colour picker
+
+`LLS:ShowColorPicker{color =, OnPick =, hasOpacity =, colorButton =}` opens Blizzard's colour picker the way a `color` row does, for an addon that also offers the colour somewhere of its own, a context menu say, so that both show the same picker, its button included. `OnPick(r, g, b, a)` is called with every change, and with the colour the picker opened with on cancel. `hasOpacity` and `colorButton` are as on a `color` setting. It needs no edit mode, so it works on every client.
 
 ### Keeping the addon's own settings working
 
@@ -217,7 +225,7 @@ runs every test with whichever Lua is installed, 5.1 or later or LuaJIT, against
 
 - `session_test.lua` - saving, cancelling, Revert All, reverting one frame, ticking not being a change, presets being read only, a new layout made by saving on a preset, importing, renaming, deleting, the parked look and switching layouts.
 - `copy_from_test.lua` - which layouts are offered as a source, what a copy brings across and leaves alone, the action row, and malformed rows being refused.
-- `page_test.lua` - the rows on a settings page: where a change goes, Revert Changes and what counts as opening the page, redrawing, trying a dropdown option on, a dropdown's tooltip following its open menu, Copy From and Reset Position outside edit mode.
+- `page_test.lua` - the rows on a settings page: where a change goes, Revert Changes and what counts as opening the page, redrawing, trying a dropdown option on, a dropdown's tooltip following its open menu, a colour's own button on the picker, Copy From and Reset Position outside edit mode.
 
 The stubbed edit mode manager copies the order in which Blizzard calls things, because the library's behaviour depends on it. Whether Blizzard still calls things that way is what `blizzard_compat.sh` checks, in a checkout of [wow-ui-source](https://github.com/Gethe/wow-ui-source):
 

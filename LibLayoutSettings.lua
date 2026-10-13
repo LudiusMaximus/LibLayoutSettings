@@ -1210,6 +1210,114 @@ local function SetupText(row, info, setting)
   end
 end
 
+-- The button a color setting's colorButton puts on Blizzard's colour picker.
+-- There is one picker for every addon, so the button is shown only while a picker
+-- this library opened asks for it, and goes again as soon as the picker closes or
+-- anyone at all sets it up afresh.
+local function ColorButton()
+  if lib.colorButton then
+    return lib.colorButton
+  end
+
+  local button = CreateFrame("Button", nil, ColorPickerFrame, "UIPanelButtonTemplate")
+  local content = ColorPickerFrame.Content
+  if content and content.HexBox then
+    -- Halfway between the swatches and the hex box, and looking as wide and as
+    -- tall as the box. Measured on the art rather than the frames: the box's
+    -- border reaches 5 past it on the left and sits 1.5 inside its top, and the
+    -- button's art keeps about 2 clear of its frame all round.
+    button:SetPoint("BOTTOMLEFT", content.HexBox, "TOPLEFT", -7.5, 18)
+    button:SetPoint("BOTTOMRIGHT", content.HexBox, "TOPRIGHT", 2, 18)
+    button:SetHeight(20)
+  else
+    -- The classic picker has neither, but room under its one swatch.
+    button:SetPoint("TOP", ColorSwatch, "BOTTOM", 0, -12)
+    button:SetSize(72, 22)
+  end
+  button:Hide()
+
+  button:SetScript("OnClick", function(self)
+    local r, g, b, a = self.libColor.r, self.libColor.g, self.libColor.b, self.libColor.a
+    -- Through the picker's own controls, so that its swatch and hex box follow
+    -- and Cancel still puts back what was there before.
+    if content and content.ColorPicker then
+      if ColorPickerFrame.hasOpacity then
+        content.ColorPicker:SetColorAlpha(a)
+      end
+      content.ColorPicker:SetColorRGB(r, g, b)
+    else
+      if ColorPickerFrame.hasOpacity then
+        OpacitySliderFrame:SetValue(a)
+      end
+      ColorPickerFrame:SetColorRGB(r, g, b)
+    end
+    -- The picker reports nothing for a colour it is already showing.
+    self.libOnPick(r, g, b, a)
+    PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
+  end)
+  button:SetScript("OnEnter", function(self)
+    if self.libTooltip then
+      local tooltip = GetAppropriateTooltip()
+      tooltip:SetOwner(self, "ANCHOR_RIGHT")
+      GameTooltip_SetTitle(tooltip, self:GetText())
+      GameTooltip_AddNormalLine(tooltip, self.libTooltip, true)
+      tooltip:Show()
+    end
+  end)
+  button:SetScript("OnLeave", function(self)
+    GetAppropriateTooltip():Hide()
+  end)
+
+  ColorPickerFrame:HookScript("OnHide", function() button:Hide() end)
+  hooksecurefunc(ColorPickerFrame, "SetupColorPickerAndShow", function() button:Hide() end)
+
+  lib.colorButton = button
+  return button
+end
+
+-- Opens Blizzard's colour picker on picker.color, calling picker.OnPick(r, g, b, a)
+-- with every change and with the colour it started from on cancel.
+local function ShowColorPicker(picker)
+  local color = picker.color or {}
+  local hasOpacity = picker.hasOpacity ~= false
+
+  -- Without its opacity slider the picker still reports an opacity, whatever
+  -- the slider was last left at, so the colour keeps its own instead.
+  local function OnPick(r, g, b, a)
+    picker.OnPick(r, g, b, hasOpacity and a or color.a or 1)
+  end
+
+  local function Picked()
+    local r, g, b = ColorPickerFrame:GetColorRGB()
+    OnPick(r, g, b, ColorPickerFrame:GetColorAlpha())
+  end
+
+  ColorPickerFrame:SetupColorPickerAndShow({
+    r = color.r or 1, g = color.g or 1, b = color.b or 1,
+    opacity = color.a or 1,
+    hasOpacity = hasOpacity,
+    swatchFunc = Picked,
+    opacityFunc = Picked,
+    cancelFunc = function(previous)
+      if previous then
+        OnPick(previous.r, previous.g, previous.b, previous.a)
+      end
+    end,
+  })
+
+  local wanted = picker.colorButton
+  if wanted then
+    -- After setting the picker up, which hides the button.
+    local button = ColorButton()
+    button:SetText(wanted.text)
+    button.libColor = { r = wanted.color.r or 1, g = wanted.color.g or 1,
+      b = wanted.color.b or 1, a = wanted.color.a or 1 }
+    button.libTooltip = wanted.tooltip
+    button.libOnPick = OnPick
+    button:Show()
+  end
+end
+
 local function SetupColor(row, info, setting)
   row.Label:SetText(setting.name)
 
@@ -1220,32 +1328,16 @@ local function SetupColor(row, info, setting)
   Show(info.GetSetting(setting.key) or {})
 
   row.libOpenPicker = function()
-    local current = info.GetSetting(setting.key) or {}
-
-    -- Handed over as a fresh table every time, so that nothing downstream ends up
-    -- holding the same table the layout stored.
-    local function Pick(r, g, b, a)
-      local color = { r = r, g = g, b = b, a = a or current.a or 1 }
-      Show(color)
-      SetRowValue(row.libHost, info, setting, color)
-    end
-
-    ColorPickerFrame:SetupColorPickerAndShow({
-      r = current.r, g = current.g, b = current.b,
-      opacity = current.a,
-      hasOpacity = setting.hasOpacity ~= false,
-      swatchFunc = function()
-        local r, g, b = ColorPickerFrame:GetColorRGB()
-        Pick(r, g, b, ColorPickerFrame:GetColorAlpha())
-      end,
-      opacityFunc = function()
-        local r, g, b = ColorPickerFrame:GetColorRGB()
-        Pick(r, g, b, ColorPickerFrame:GetColorAlpha())
-      end,
-      cancelFunc = function(previous)
-        if previous then
-          Pick(previous.r, previous.g, previous.b, previous.a)
-        end
+    ShowColorPicker({
+      color = info.GetSetting(setting.key),
+      hasOpacity = setting.hasOpacity,
+      colorButton = setting.colorButton,
+      -- Handed over as a fresh table every time, so that nothing downstream ends
+      -- up holding the same table the layout stored.
+      OnPick = function(r, g, b, a)
+        local color = { r = r, g = g, b = b, a = a }
+        Show(color)
+        SetRowValue(row.libHost, info, setting, color)
       end,
     })
   end
@@ -2198,6 +2290,16 @@ end
 function lib:GetActiveLayoutName()
   local layout = ActiveLayout()
   return layout and layout.layoutName or nil
+end
+
+--- Opens Blizzard's colour picker the way a color row does, its button and
+-- all, for a colour the addon also offers somewhere of its own, a context menu
+-- say. Needs no edit mode, so it works on every client.
+-- @param picker  {color =, OnPick =, hasOpacity =, colorButton =}, see README.md
+function lib:ShowColorPicker(picker)
+  assert(type(picker) == "table" and type(picker.OnPick) == "function",
+    MAJOR .. ": picker.OnPick has to be a function.")
+  ShowColorPicker(picker)
 end
 
 --- Registers a frame for layout aware placement and settings.
