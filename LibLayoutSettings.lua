@@ -281,9 +281,10 @@ local function HostHasChanges(host, info)
 end
 
 -- The revert row and the reset position row each enable themselves only while
--- there is something to undo, the way Blizzard's own buttons do. Updated in place
--- rather than by redrawing, because a slider drag would redraw on every frame,
--- and so would holding an arrow key down.
+-- there is something to undo, the way Blizzard's own buttons do, and a button of
+-- the addon's own follows its IsDisabled the same way. Updated in place rather
+-- than by redrawing, because a slider drag would redraw on every frame, and so
+-- would holding an arrow key down.
 local function RefreshHostButtonStates(host)
   local rows = host and host.rows
   if not rows then
@@ -303,6 +304,14 @@ local function RefreshHostButtonStates(host)
     local row = pool[index]
     if row.libInfo then
       row:SetEnabled(not IsInDefaultPosition(row.libInfo))
+    end
+  end
+
+  pool = rows.button
+  for index = 1, (pool and pool.used or 0) do
+    local setting = pool[index].libSetting
+    if setting and setting.IsDisabled then
+      pool[index]:SetEnabled(not setting.IsDisabled())
     end
   end
 end

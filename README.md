@@ -82,7 +82,7 @@ Pass `true` to drop one strata below the frame, or a strata name where the frame
 | `sameRow` | all | put this in the second column of the row before it, rather than on one of its own |
 | `padTop` | all | extra space above this row, in pixels. A `revert` row takes 12 by default, matching the gap Blizzard leaves above its own button block |
 | `text`, `OnClick` | button | label, and what pressing it does. `OnClick` is passed the registration |
-| `IsDisabled` | all | optional predicate, greys the row out when it returns true |
+| `IsDisabled` | all | optional predicate, greys the row out when it returns true. A button's is asked again after every change, as Revert's state is, so it can follow the frame |
 | `tooltip` | all | mouseover text, or a function returning it. Titled with `name`, or `text` for a button, or the label the library put on the row |
 | `refreshOnChange` | checkbox, dropdown | redraw the dialog after this changes, so rows it greys out follow. Never put it on a slider, whose value changes on every frame of a drag |
 | `minValue`, `maxValue`, `stepSize` | slider | range, `stepSize` defaults to 1 |
@@ -226,7 +226,7 @@ runs every test with whichever Lua is installed, 5.1 or later or LuaJIT, against
 
 - `session_test.lua` - saving, cancelling, Revert All, reverting one frame, ticking not being a change, presets being read only, a new layout made by saving on a preset, importing, renaming, deleting, the parked look and switching layouts.
 - `copy_from_test.lua` - which layouts are offered as a source, what a copy brings across and leaves alone, the action row, and malformed rows being refused.
-- `page_test.lua` - the rows on a settings page: where a change goes, Revert Changes and what counts as opening the page, redrawing, trying a dropdown option on, a dropdown's tooltip following its open menu, a colour's own button on the picker, being told the picker has opened and gone, Copy From and Reset Position outside edit mode.
+- `page_test.lua` - the rows on a settings page: where a change goes, Revert Changes and what counts as opening the page, redrawing, trying a dropdown option on, a dropdown's tooltip following its open menu, a colour's own button on the picker, being told the picker has opened and gone, Copy From, Reset Position and a button greying itself out outside edit mode.
 
 The stubbed edit mode manager copies the order in which Blizzard calls things, because the library's behaviour depends on it. Whether Blizzard still calls things that way is what `blizzard_compat.sh` checks, in a checkout of [wow-ui-source](https://github.com/Gethe/wow-ui-source):
 

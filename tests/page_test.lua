@@ -1,9 +1,9 @@
 -- The rows drawn onto a settings page of the addon's own: they are there, a
 -- change goes through the addon to whatever the frame is wearing, Revert Changes
 -- goes back to how the page was opened, a change made elsewhere redraws the page
--- but a change made on it does not, and Copy From, Reset Position and a colour's
--- own button on the colour picker work there too. Nothing on the page is an edit
--- mode change.
+-- but a change made on it does not, and Copy From, Reset Position, a button that
+-- greys itself out and a colour's own button on the colour picker work there
+-- too. Nothing on the page is an edit mode change.
 
 local here = debug.getinfo(1, "S").source:sub(2):match("^(.*)[/\\]") or "."
 dofile(here .. "/stubs.lua")
@@ -90,6 +90,9 @@ local registration = {
     { key = "fontcolor", name = "Font Color", type = "color", sameRow = true },
     { type = "revert" },
     { type = "resetPosition" },
+    -- Greyed out while the width is 300, as a reset to that width would be.
+    { type = "button", text = "Width to 300", IsDisabled = function() return Get("width") == 300 end,
+      OnClick = function() Edit("width", 300) end },
     { type = "actions", name = "Copy From",
       actions = function()
         local sources = {}
@@ -198,6 +201,15 @@ Check("the bar is off its default spot", reset:IsEnabled())
 reset:GetScript("OnClick")()
 Check("it goes back", own.p == "BOTTOM" and own.x == 0 and own.y == -170)
 Check("and the button greys out", not reset:IsEnabled())
+
+print("== a button follows its IsDisabled ==")
+local plain = page.rows.button[1]
+slot(slider.Slider).callback(slider, 300)
+Check("greyed out while it says so", not plain:IsEnabled())
+slot(slider.Slider).callback(slider, 420)
+Check("back as soon as a change makes it false", plain:IsEnabled())
+slot(slider.Slider).callback(slider, 300)
+Check("and greyed again when it is true again", not plain:IsEnabled())
 
 print("== an option is tried on while the mouse rests on it ==")
 local dropdown = page.rows.dropdown[1]
