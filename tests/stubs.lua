@@ -141,7 +141,10 @@ CreateFrame = function(_, _, parent)
   return frame
 end
 
+ScrollUtil = { InitScrollFrameWithScrollBar = function() end }
 UIParent = Stub()
+-- A 1080 high screen, for the dialog to measure itself against.
+UIParent:SetHeight(1080)
 ColorPickerFrame = Stub()
 PlaySound = function() end
 SOUNDKIT = Stub()

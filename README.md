@@ -13,7 +13,7 @@ So this library never touches Blizzard's layout data. It only reads which layout
 - A panel next to the edit mode manager with one checkbox per registered frame, scrolling rather than growing once enough addons have registered.
 - Blizzard's own selection glow on the frame while edit mode is active, complete with label, mouseover highlight and click to edit.
 - Dragging the frame by that glow, and nudging it a pixel at a time with the arrow keys, ten at a time with shift held.
-- A settings dialog of slider, checkbox, dropdown, colour, text, button, separator, revert, reset position and action rows.
+- A settings dialog of slider, checkbox, dropdown, colour, text, button, separator, revert, reset position and action rows, scrolling rather than growing past 90% of the screen's height.
 - Copying one layout's stored look onto another.
 - The same rows drawn onto a settings page of the addon's own, for changing the frame outside edit mode.
 - Save, cancel and revert semantics that match Blizzard's, including creating a new layout when saving while a preset layout is active.
@@ -178,6 +178,8 @@ Preset layouts are read only, as they are for Blizzard's own systems. During an 
 | `LLS:ClearSelection()` | close it again |
 | `LLS:SetManaged(key, managed)` | tick or untick the panel checkbox for the active layout |
 | `LLS:ShowColorPicker(picker)` | open the colour picker as a `color` row does, see below |
+| `LLS:CreateScrollFrame(parent)` | a scroll frame with the scroll bar of Blizzard's settings window on every client, `MinimalScrollBar`, shown only when there is something to scroll. The Classic clients' `ScrollFrameTemplate` gives the older one. Set its points and scroll child as usual |
+| `LLS:GetButtonLayout()` | where the two columns of rows start, from the left of the frame they are drawn into, and the width and height of a button row, for lining buttons of the addon's own up with them |
 
 `SelectFrame`, `ClearSelection` and `SetManaged` are what the panel and the glow call, exposed so an addon can drive the same thing from its own UI. Anything else on the library table is internal.
 
@@ -235,7 +237,7 @@ bash tests/blizzard_compat.sh ../wow-ui-source                          # every 
 bash tests/blizzard_compat.sh ../wow-ui-source origin/live~1 origin/live  # what the latest patch changed
 ```
 
-It reads what the library uses straight out of `LibLayoutSettings.lua`, so a newly hooked method or a new template is covered without editing the script. Anything missing fails it. A changed method body is only reported, since not every change matters, but when one is, the stub in `session_test.lua` may need the same change.
+It reads what the library uses straight out of `LibLayoutSettings.lua`, so a newly hooked method, a new template or a new font object is covered without editing the script. Anything missing fails it. A changed method body is only reported, since not every change matters, but when one is, the stub in `session_test.lua` may need the same change.
 
 ## License
 

@@ -14,8 +14,10 @@
 # template added there is covered without touching this file:
 #
 #   - every hooked or called EditModeManagerFrame method must exist,
-#   - every template, mixin and edit mode event it names must exist, and every
-#     child of the manager it reaches for, a button say,
+#   - every template, mixin, font object and edit mode event it names must
+#     exist, and every child of the manager it reaches for, a button say. A name
+#     it only uses after looking it up in _G is one it can do without, and is
+#     left out,
 #   - and the bodies of those methods, plus the few whose order the library relies
 #     on without hooking them, are compared with the base. A difference is not
 #     necessarily a break, so it is reported for a person to read.
@@ -39,9 +41,13 @@ manager=Interface/AddOns/Blizzard_EditMode/Shared/EditModeManager.lua
 src=$(tr -d '\r' < "$lib")
 methods=$( { printf '%s\n' "$src" | grep -oE 'hooksecurefunc\(EditModeManagerFrame, *"[A-Za-z]+"' | grep -oE '"[A-Za-z]+"' | tr -d '"'
              printf '%s\n' "$src" | grep -oE 'EditModeManagerFrame:[A-Za-z]+\(' | sed -E 's/.*:([A-Za-z]+)\(/\1/'; } | sort -u)
-templates=$(printf '%s\n' "$src" | grep -oE '"[A-Za-z]+Template"' | tr -d '"' | sort -u)
-mixins=$(printf '%s\n' "$src" | grep -oE '\b(EditMode[A-Za-z]*Mixin|MinimalSlider[A-Za-z]*Mixin|DropdownButtonMixin|CreateMinimalSliderFormatter)\b' | sort -u)
+templates=$(printf '%s\n' "$src" | grep -oE '"[A-Za-z]+(Template|ScrollBar)"' | tr -d '"' | sort -u)
+mixins=$(printf '%s\n' "$src" | grep -oE '\b(EditMode[A-Za-z]*Mixin|MinimalSlider[A-Za-z]*Mixin|DropdownButtonMixin|CreateMinimalSliderFormatter|ScrollUtil)\b' | sort -u)
 events=$(printf '%s\n' "$src" | grep -oE 'RegisterCallback\("EditMode\.[A-Za-z]+"' | grep -oE 'EditMode\.[A-Za-z]+' | sort -u)
+# Names the library looks up in _G before using them, which it can do without.
+optional=$(printf '%s\n' "$src" | grep -oE '_G\.[A-Za-z0-9_]+' | sed 's/^_G\.//' | sort -u)
+fonts=$(printf '%s\n' "$src" | grep -oE '"(GameFont|ChatFont|SystemFont)[A-Za-z0-9_]+"' | tr -d '"' | sort -u \
+        | grep -vxF -f <(printf '%s\n' $optional))
 # Fields read off the manager that are not its methods: child frames.
 children=$(printf '%s\n' "$src" | grep -oE 'EditModeManagerFrame\.[A-Z][A-Za-z]+' | sed 's/.*\.//' | sort -u \
            | grep -vxF -f <(printf '%s\n' $methods))
@@ -62,7 +68,8 @@ body() {   # ref, method: the method's body with whitespace collapsed
 
 status=0
 echo "LibLayoutSettings uses $(echo $methods | wc -w) manager methods, $(echo $templates | wc -w) templates," \
-     "$(echo $mixins | wc -w) mixins and helpers, $(echo $events | wc -w) events and $(echo $children | wc -w) of its children."
+     "$(echo $mixins | wc -w) mixins and helpers, $(echo $fonts | wc -w) font objects, $(echo $events | wc -w) events" \
+     "and $(echo $children | wc -w) of its children."
 echo "Base: $base  ($(git -C "$repo" log -1 --format=%s "$base" 2>/dev/null))"
 echo
 
@@ -81,6 +88,9 @@ for ref in "${refs[@]}"; do
   done
   for x in $mixins; do
     git -C "$repo" grep -qw "$x" "$ref" -- 'Interface/*.lua' || missing+=("$x")
+  done
+  for f in $fonts; do
+    git -C "$repo" grep -qE "name=\"$f\"|CreateFont\(\"$f\"" "$ref" -- 'Interface/*.xml' 'Interface/*.lua' || missing+=("$f")
   done
   for e in $events; do
     git -C "$repo" grep -qF "\"$e\"" "$ref" -- 'Interface/*.lua' || missing+=("$e")

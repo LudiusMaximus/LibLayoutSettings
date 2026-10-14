@@ -429,6 +429,23 @@ local panelScrollBarRoom = 33
 -- reach past the bottom of the screen on any resolution edit mode is usable at.
 local panelMaxRows = 10
 
+-- A scroll frame with the scroll bar Blizzard's settings window has on every
+-- client, MinimalScrollBar, hung right of it where ScrollFrameTemplate hangs it
+-- on retail and shown only when there is something to scroll. The template
+-- itself gives the Classic clients their older scroll bar, which the panel
+-- keeps, as the edit mode manager it hangs beside has it too.
+local function CreateScrollFrame(parent)
+  local scroll = CreateFrame("ScrollFrame", nil, parent)
+  local bar = CreateFrame("EventFrame", nil, scroll, "MinimalScrollBar")
+  bar:SetPoint("TOPLEFT", scroll, "TOPRIGHT", 6, 2)
+  bar:SetPoint("BOTTOMLEFT", scroll, "BOTTOMRIGHT", 6, 5)
+  bar:SetHideIfUnscrollable(true)
+  ScrollUtil.InitScrollFrameWithScrollBar(scroll, bar)
+  bar:Update()
+  scroll.ScrollBar = bar
+  return scroll
+end
+
 local function BuildPanel()
   if lib.panel then
     return lib.panel
@@ -450,8 +467,9 @@ local function BuildPanel()
   panel.Title:SetText(ADDONS or "AddOns")
 
   -- Built the way the edit mode manager builds its own settings list, so that a
-  -- long list scrolls rather than running off the bottom of the screen. The bar
-  -- sits outside the rows and only appears when there is something to scroll.
+  -- long list scrolls rather than running off the bottom of the screen, with the
+  -- manager's own scroll bar beside the manager. The bar sits outside the rows
+  -- and only appears when there is something to scroll.
   local list = CreateFrame("ScrollFrame", nil, panel, "ScrollFrameTemplate")
   list:SetPoint("TOPLEFT", panel, "TOPLEFT", panelListInset, -panelHeaderHeight)
   if list.ScrollBar then
@@ -711,8 +729,7 @@ local rowControl = {
 -- Rows that are not one of Blizzard's setting rows have a height of their own.
 local rowHeights = { separator = 22, button = 32, revert = 32, resetPosition = 32 }
 -- Buttons are left aligned with the setting labels, the way Blizzard anchors its
--- own to the bottom left of its settings block, whatever their width. Only the
--- divider is centred.
+-- own to the bottom left of its settings block. Only the divider is centred.
 local rowCentred = { separator = true }
 -- Two rows sharing a line each take half the width one would have had, so that
 -- the left one stops before the right one starts. Not cosmetic: a row is mouse
@@ -728,6 +745,14 @@ local rowPadTop = { revert = 12 }
 local labelColumnWidth = 100
 local controlGap = 5
 local columnOffsets = { 26, 198 }
+-- A dropdown is 225 wide, which Blizzard's own dropdown row sets in its OnLoad,
+-- and a text box is made as wide, so a row's control ends 330 past its start.
+local controlWidth = 225
+-- Every button is one width whichever column it is in: the room one in the
+-- second column has before the controls end, so that it stops where they do.
+-- The height is EditModeSystemSettingsDialogButtonTemplate's.
+local buttonWidth = columnOffsets[1] + labelColumnWidth + controlGap + controlWidth - columnOffsets[2]
+local buttonHeight = 28
 -- Where a swatch and the label after it sit, matched to the checkbox rows.
 local swatchInset = 3
 local boxedLabelInset = 32
@@ -750,6 +775,12 @@ local pairedLabelWidth = 130
 -- one that disappears.
 
 local tooltipGap = 8
+
+-- The frame a host's rows are drawn on: the host itself, or for the edit mode
+-- dialog the canvas it scrolls. See BuildDialog.
+local function CanvasOf(host)
+  return host.libCanvas or host
+end
 
 -- The text is described on the setting and read at hover time, so a row can be
 -- wired once when it is created and still say the right thing for whatever
@@ -794,7 +825,7 @@ local function ShowRowTooltip(frame)
   tooltip:ClearAllPoints()
   -- Level with the row, from the offset the row was placed at, rather than from
   -- its rect: a row that has just been shown may not have been laid out yet.
-  tooltip:SetPoint("TOPLEFT", row.libHost, "TOPRIGHT", tooltipGap, row.libOffsetY or 0)
+  tooltip:SetPoint("TOPLEFT", CanvasOf(row.libHost), "TOPRIGHT", tooltipGap, row.libOffsetY or 0)
   GameTooltip_SetTitle(tooltip, title)
   GameTooltip_AddNormalLine(tooltip, text, true)
   tooltip:Show()
@@ -916,7 +947,8 @@ local function NewRowPools()
 end
 
 -- The host is the frame the row is drawn into: the edit mode dialog, or a
--- settings page from CreateSettingsFrame. A row stays with its host for life.
+-- settings page from CreateSettingsFrame. A row stays with its host for life,
+-- on the host's canvas.
 local function AcquireRow(host, kind)
   local pool = host.rows[kind]
   pool.used = (pool.used or 0) + 1
@@ -926,8 +958,10 @@ local function AcquireRow(host, kind)
     return row
   end
 
+  local canvas = CanvasOf(host)
+
   if kind == "text" then
-    row = CreateFrame("Frame", nil, host)
+    row = CreateFrame("Frame", nil, canvas)
     row:SetSize(343, 32)
 
     row.Label = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightMedium")
@@ -940,7 +974,7 @@ local function AcquireRow(host, kind)
     -- next to the edit mode's own dark rows. Sized and placed like a dropdown
     -- row, so that the control column lines up down the dialog.
     row.EditBox = CreateFrame("EditBox", nil, row, "TooltipBackdropTemplate")
-    row.EditBox:SetSize(225, 25)
+    row.EditBox:SetSize(controlWidth, 25)
     row.EditBox:SetPoint("LEFT", row.Label, "RIGHT", controlGap, 0)
     row.EditBox:SetFontObject(ChatFontNormal)
     row.EditBox:SetTextInsets(6, 6, 2, 2)
@@ -972,17 +1006,17 @@ local function AcquireRow(host, kind)
     end)
 
   elseif kind == "separator" then
-    row = CreateFrame("Frame", nil, host)
+    row = CreateFrame("Frame", nil, canvas)
     row:SetSize(330, 16)
     row.Line = row:CreateTexture(nil, "ARTWORK")
     row.Line:SetTexture([[Interface\FriendsFrame\UI-FriendsFrame-OnlineDivider]])
     row.Line:SetAllPoints()
 
   elseif rowIsButton[kind] then
-    row = CreateFrame("Button", nil, host, "EditModeSystemSettingsDialogButtonTemplate")
+    row = CreateFrame("Button", nil, canvas, "EditModeSystemSettingsDialogButtonTemplate")
 
   elseif kind == "color" then
-    row = CreateFrame("Frame", nil, host)
+    row = CreateFrame("Frame", nil, canvas)
     row:SetSize(343, 32)
 
     -- ColorSwatchTemplate is declared as a Frame, but Blizzard's own
@@ -1005,7 +1039,7 @@ local function AcquireRow(host, kind)
       end
     end)
   else
-    row = CreateFrame("Frame", nil, host, rowTemplates[kind])
+    row = CreateFrame("Frame", nil, canvas, rowTemplates[kind])
   end
   pool[pool.used] = row
   row.libHost = host
@@ -1380,9 +1414,25 @@ end
 
 -- Greys a row out. The setting still holds its value, it just cannot be reached,
 -- which is what a setting another one has made moot should look like.
+-- Blizzard's edit mode greys a label out with GameFontDisableMed2, its medium
+-- font in grey, which only retail and WoW Forever define, though the Classic
+-- clients' edit mode names it too. There the label keeps its font and takes the
+-- same grey.
+local disabledLabelFont = _G.GameFontDisableMed2 and "GameFontDisableMed2"
+
+local function SetLabelEnabled(label, enabled)
+  if disabledLabelFont then
+    label:SetFontObject(enabled and "GameFontHighlightMedium" or disabledLabelFont)
+  else
+    label:SetFontObject("GameFontHighlightMedium")
+    local shade = enabled and 1 or 0.5
+    label:SetTextColor(shade, shade, shade)
+  end
+end
+
 local function SetRowEnabled(row, kind, enabled)
   if row.Label then
-    row.Label:SetFontObject(enabled and "GameFontHighlightMedium" or "GameFontDisableMed2")
+    SetLabelEnabled(row.Label, enabled)
   end
 
   if kind == "checkbox" then
@@ -1457,6 +1507,10 @@ end
 -- title above the rows and its border around them, a settings page neither.
 local dialogWidth = 400
 local dialogTop, dialogBottom = 48, 20
+-- The dialog grows with its rows up to this share of the screen's height and
+-- scrolls the rest, its scroll bar in the room kept free right of the rows.
+local dialogMaxShare = 0.9
+local dialogScrollBarRoom = 33
 
 local function BuildDialog()
   if lib.dialog then
@@ -1499,6 +1553,18 @@ local function BuildDialog()
     lib:ClearSelection()
   end)
 
+  -- The rows go on a canvas in a scroll frame below the title, with the settings
+  -- window's scroll bar. The canvas is as wide as the dialog, so that a divider is
+  -- centred on it and a row's tooltip clears its edge, but the scroll frame stops
+  -- short of the right, where its scroll bar goes, and the rows end before that.
+  local scroll = CreateScrollFrame(dialog)
+  scroll:SetPoint("TOPLEFT", dialog, "TOPLEFT", 0, -dialogTop)
+  scroll:SetPoint("BOTTOMRIGHT", dialog, "BOTTOMRIGHT", -dialogScrollBarRoom, dialogBottom)
+  dialog.libCanvas = CreateFrame("Frame", nil, scroll)
+  dialog.libCanvas:SetWidth(dialogWidth)
+  scroll:SetScrollChild(dialog.libCanvas)
+  dialog.libScroll = scroll
+
   dialog.rows = NewRowPools()
 
   lib.dialog = dialog
@@ -1533,6 +1599,7 @@ local function Populate(host, info, top, bottom)
     pool.used = 0
   end
 
+  local canvas = CanvasOf(host)
   local offsetY = -top
   local lastHeight = 0
 
@@ -1550,9 +1617,9 @@ local function Populate(host, info, top, bottom)
 
     row:ClearAllPoints()
     if rowCentred[kind] then
-      row:SetPoint("TOP", host, "TOP", 0, offsetY)
+      row:SetPoint("TOP", canvas, "TOP", 0, offsetY)
     else
-      row:SetPoint("TOPLEFT", host, "TOPLEFT", columnOffsets[column], offsetY)
+      row:SetPoint("TOPLEFT", canvas, "TOPLEFT", columnOffsets[column], offsetY)
     end
     row:Show()
 
@@ -1611,12 +1678,13 @@ local function Populate(host, info, top, bottom)
       -- Rows built here have a fixed width, so a paired one has to be told to
       -- give the other half back. Rows on Blizzard's templates size themselves
       -- from their contents and report no width of their own, so they are left
-      -- alone, the label above having already narrowed them.
-      if type(row.libWidth) == "number" and row.libWidth > 0 then
-        row:SetWidth(paired and pairedRowWidth or row.libWidth)
-      end
+      -- alone, the label above having already narrowed them. A button is the
+      -- same width alone or paired.
       if rowIsButton[setting.type] then
+        row:SetWidth(buttonWidth)
         FitButtonText(row)
+      elseif type(row.libWidth) == "number" and row.libWidth > 0 then
+        row:SetWidth(paired and pairedRowWidth or row.libWidth)
       end
 
       if setting.type == "revert" then
@@ -1635,13 +1703,21 @@ local function Populate(host, info, top, bottom)
     end
   end
 
-  host:SetHeight(-offsetY + bottom)
+  canvas:SetHeight(-offsetY + bottom)
 end
 
 local function PopulateDialog(info)
   local dialog = BuildDialog()
   dialog.Title:SetText(info.displayName)
-  Populate(dialog, info, dialogTop, dialogBottom)
+  Populate(dialog, info, 0, 0)
+
+  -- Another frame starts at its top, a redraw of the same one stays where it was.
+  if dialog.libShowing ~= info then
+    dialog.libShowing = info
+    dialog.libScroll:SetVerticalScroll(0)
+  end
+  local height = dialog.libCanvas:GetHeight() + dialogTop + dialogBottom
+  dialog:SetHeight(min(height, floor(UIParent:GetHeight() * dialogMaxShare)))
 end
 
 
@@ -1680,7 +1756,7 @@ function RefreshPanel()
 
     -- After the show, because Blizzard's OnShow re-enables the button.
     row.Button:SetEnabled(writable)
-    row.Label:SetFontObject(writable and "GameFontHighlightMedium" or "GameFontDisableMed2")
+    SetLabelEnabled(row.Label, writable)
   end
 
   for i = index + 1, #panel.rows do
@@ -2325,6 +2401,21 @@ end
 function lib:GetActiveLayoutName()
   local layout = ActiveLayout()
   return layout and layout.layoutName or nil
+end
+
+--- Returns a scroll frame with the scroll bar Blizzard's settings window has on
+-- every client, shown only when there is something to scroll, as the settings
+-- dialog has it. For a settings page of the addon's own to match.
+-- @param parent  the frame to create it on; set its points and scroll child
+function lib:CreateScrollFrame(parent)
+  return CreateScrollFrame(parent)
+end
+
+--- Returns where the two columns of rows start, from the left of the frame the
+-- rows are drawn into, and the width and height of a button row, so that
+-- buttons of the addon's own around the rows can line up with them.
+function lib:GetButtonLayout()
+  return columnOffsets[1], columnOffsets[2], buttonWidth, buttonHeight
 end
 
 --- Opens Blizzard's colour picker the way a color row does, its button and

@@ -218,6 +218,20 @@ Check("an action row was drawn", row ~= nil)
 Check("the button shows the placeholder", row.Dropdown:GetDefaultText() == "Choose...")
 Check("it is enabled, because there is something to pick", row.Dropdown:IsEnabled())
 
+print("== the dialog fits on the screen ==")
+local dialog = LLS.dialog
+local fullHeight = dialog:GetHeight()
+Check("as tall as its rows on a large screen", fullHeight == dialog.libCanvas:GetHeight() + 48 + 20)
+-- Selecting the frame that is already selected redraws nothing, so let go first.
+UIParent:SetHeight(fullHeight)
+LLS:ClearSelection()
+LLS:SelectFrame("Bar")
+Check("no taller than 90% of a smaller one", dialog:GetHeight() == math.floor(fullHeight * 0.9))
+Check("the rows scrolling in what is left", dialog.libCanvas:GetHeight() > dialog:GetHeight() - 48 - 20)
+UIParent:SetHeight(1080)
+LLS:ClearSelection()
+LLS:SelectFrame("Bar")
+
 -- Open the menu the way the dropdown would.
 local entries = {}
 local menu = {
