@@ -1,9 +1,12 @@
 -- The rows drawn onto a settings page of the addon's own: they are there, a
--- change goes through the addon to whatever the frame is wearing, Revert Changes
--- goes back to how the page was opened, a change made elsewhere redraws the page
--- but a change made on it does not, and Copy From, Reset Position, a button that
--- greys itself out and a colour's own button on the colour picker work there
--- too. Nothing on the page is an edit mode change.
+-- change goes through the addon to whatever the frame is wearing, the layout
+-- specific row takes effect at once, Revert Changes goes back to how the page was
+-- opened, a change made elsewhere redraws the page but a change made on it does
+-- not, tooltips go left of the rows together where the widest would not fit
+-- right, and Copy From, Reset Position, a button that greys itself out and a
+-- colour's own button on the colour picker work there too. Nothing on the page is
+-- an edit mode change. Before all that, a registration under a layout that has
+-- parked its look, and one without EditSetting.
 
 local here = debug.getinfo(1, "S").source:sub(2):match("^(.*)[/\\]") or "."
 dofile(here .. "/stubs.lua")
@@ -78,7 +81,9 @@ local registration = {
   displayName = "TestBar",
   storage = storage,
   settings = {
-    { key = "width", name = "Width", type = "slider", minValue = 40, maxValue = 1000, stepSize = 5 },
+    { type = "layoutSpecific", name = "Layout Specific" },
+    { key = "width", name = "Width", type = "slider", minValue = 40, maxValue = 1000, stepSize = 5,
+      tooltip = "How wide the bar is, from one end to the other, whatever the font in it." },
     { key = "spark", name = "Spark", type = "checkbox" },
     -- Records what it is asked to try on, "off" for giving it up.
     { key = "texture", name = "Texture", type = "dropdown", tooltip = "What fills the bar.",
@@ -123,17 +128,37 @@ end
 
 --------------------------------------------------------------------------------
 
-print("== a page needs somewhere to send its changes ==")
-LLS:RegisterFrame("NoEdit", {
+print("== a registration needs somewhere to send the own settings ==")
+Check("one without EditSetting is refused", not pcall(LLS.RegisterFrame, LLS, "NoEdit", {
   GetFrame = function() return Stub() end,
   displayName = "NoEdit",
   storage = {},
+  settings = { { key = "width", name = "Width", type = "slider", minValue = 1, maxValue = 2 } },
+  GetSetting = function() end,
+  SetSetting = function() end,
   GetPosition = function() return "CENTER", "CENTER", 0, 0 end,
   SetPosition = function() end,
+  EditPosition = function() end,
+  RestoreOwnSettings = function() end,
+}))
+
+print("== registering under a layout that has parked its look ==")
+local parkedWidth
+LLS:RegisterFrame("Parked", {
+  GetFrame = function() return Stub() end,
+  displayName = "Parked",
+  storage = { ["1:Travel"] = { inactive = true, position = {}, settings = { width = 999 } } },
+  settings = { { key = "width", name = "Width", type = "slider", minValue = 1, maxValue = 1000 } },
+  GetSetting = function() return parkedWidth end,
+  SetSetting = function(_, value) parkedWidth = value end,
+  EditSetting = function() end,
+  GetPosition = function() return "CENTER", "CENTER", 0, 0 end,
+  SetPosition = function() end,
+  EditPosition = function() end,
+  RestoreOwnSettings = function() end,
 })
-Check("a registration without EditSetting is refused a page",
-  not pcall(LLS.CreateSettingsFrame, LLS, "NoEdit", Stub()))
-LLS:UnregisterFrame("NoEdit")
+Check("the parked look is not put on the frame", parkedWidth == nil)
+LLS:UnregisterFrame("Parked")
 
 print("== the page ==")
 local page = LLS:CreateSettingsFrame("Bar", Stub())
@@ -176,17 +201,33 @@ Check("and the slider shows the new width", slider.libLast == 350)
 own.width = 300
 LLS:Capture("Bar")
 
+print("== the layout specific row ==")
+local layoutSpecific = page.rows.layoutSpecific[1]
+Check("is drawn, unticked while no layout owns the bar", layoutSpecific and not layoutSpecific.checked)
+Check("and can be ticked", layoutSpecific.Button:IsEnabled())
+layoutSpecific:OnCheckButtonClick()
+Check("ticking it gives the bar to Travel at once", storage["1:Travel"] and not storage["1:Travel"].inactive)
+Check("and the redrawn row shows it", page.rows.layoutSpecific[1].checked)
+
 print("== while a layout owns the frame, a change goes to the layout ==")
-LLS:SetManaged("Bar", true)
-Check("Travel owns the bar", storage["1:Travel"] and not storage["1:Travel"].inactive)
+Check("Travel owns the bar", LLS:IsManaged("Bar"))
 slot(slider.Slider).callback(slider, 600)
 Check("the layout takes the width", over.width == 600 and storage["1:Travel"].settings.width == 600)
 Check("the user's own stays", own.width == 300)
 revert:GetScript("OnClick")()
 Check("revert puts the layout's width back", over.width == 300 and storage["1:Travel"].settings.width == 300)
 slot(slider.Slider).callback(slider, 650)
-LLS:SetManaged("Bar", false)
-Check("unticking redraws the page with the user's own width", slider.libLast == 300)
+page.rows.layoutSpecific[1]:OnCheckButtonClick()
+Check("unticking parks the layout's look at once", storage["1:Travel"].inactive
+  and storage["1:Travel"].settings.width == 650)
+Check("and redraws the page with the user's own width", slider.libLast == 300)
+
+print("== on a preset, outside edit mode, the row is greyed out ==")
+EditModeManagerFrame.layoutInfo.activeLayout = 1
+LLS:Capture("Bar")
+Check("nothing can be given to a preset here", not page.rows.layoutSpecific[1].Button:IsEnabled())
+EditModeManagerFrame.layoutInfo.activeLayout = 2
+LLS:Capture("Bar")
 
 print("== Copy From, outside edit mode ==")
 local copyFrom = page.rows.actions[1]
@@ -270,6 +311,32 @@ slot(dropdown.Dropdown).callbacks.OnMenuClose()
 watcher:GetScript("OnUpdate")(watcher)
 Check("a closed menu is no longer watched", not watcher:IsShown())
 dropdown:GetScript("OnLeave")(dropdown)
+
+print("== tooltips go left of the rows together, where the widest would not fit right ==")
+-- Seven pixels a character in the stubbed tooltip: the width row's tooltip is
+-- 504 wide, the texture row's 133.
+page.libTooltipWidth = nil
+function UIParent:GetRight() return 1920 end
+function UIParent:GetEffectiveScale() return 1 end
+function page:GetEffectiveScale() return 1 end
+function page:GetRight() return 1000 end
+local widthRow = page.rows.slider[1]
+tip.shown = false
+dropdown:GetScript("OnEnter")(dropdown)
+Check("with room for the widest, a short one goes right", tip.shown and tip.point == "TOPLEFT")
+Check("still owned by its row after the measuring", tip.owner == dropdown)
+tip.shown = false
+widthRow:GetScript("OnEnter")(widthRow)
+Check("and so does the widest", tip.shown and tip.point == "TOPLEFT")
+function page:GetRight() return 1500 end
+tip.shown = false
+widthRow:GetScript("OnEnter")(widthRow)
+Check("without, the widest goes left", tip.shown and tip.point == "TOPRIGHT")
+tip.shown = false
+dropdown:GetScript("OnEnter")(dropdown)
+Check("and a short one that would fit right goes left with it", tip.shown and tip.point == "TOPRIGHT")
+tip.shown = false
+UIParent.GetRight, UIParent.GetEffectiveScale, page.GetRight, page.GetEffectiveScale = nil, nil, nil, nil
 
 print("== a colour's own button on the colour picker ==")
 local barColor, fontColor = page.rows.color[1], page.rows.color[2]

@@ -94,6 +94,14 @@ local recorders = {
     end
   end,
   IsShown = function(self) return slot(self).shown == true end,
+  SetShown = function(self, shown) if shown then self:Show() else self:Hide() end end,
+  SetFrameLevel = function(self, v) slot(self).frameLevel = v end,
+  -- Off limits to addons in combat, as in the game.
+  SetPropagateKeyboardInput = function(self, v)
+    if STUB.inCombat then error("ADDON_ACTION_BLOCKED: SetPropagateKeyboardInput") end
+    slot(self).propagate = v
+  end,
+  GetFrameLevel = function(self) return slot(self).frameLevel or 1 end,
   IsVisible = function(self) return slot(self).shown == true end,
   -- Callbacks by event, and the last one registered, which for a slider is its
   -- change callback, kept so the test can move the slider.
@@ -130,7 +138,11 @@ local function Stub() return setmetatable({}, StubMT) end
 -- Every frame made, so that a test can find one the library keeps to itself.
 local frames = {}
 
-CreateFrame = function(_, _, parent)
+-- The one tooltip, defined below, which a GameTooltip of the library's own is.
+local FakeTooltip
+
+CreateFrame = function(frameType, _, parent)
+  if frameType == "GameTooltip" then return FakeTooltip end
   local frame = Stub()
   frames[#frames + 1] = frame
   if parent then
@@ -156,18 +168,24 @@ EditModeSystemSelectionMixin = {}
 HUD_EDIT_MODE_REVERT_CHANGES = "Revert Changes"
 HUD_EDIT_MODE_RESET_POSITION = "Reset Position"
 function IsShiftKeyDown() return false end
+-- A test sets STUB.inCombat to play a fight.
+function InCombatLockdown() return STUB.inCombat == true end
 function strtrim(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
 
 local tip = { shown = false }
-local FakeTooltip = {}
+-- Anything not defined here answers to any call, as other stubs do.
+FakeTooltip = setmetatable({}, StubMT)
 function FakeTooltip:SetOwner(frame) tip.owner = frame end
 function FakeTooltip:GetOwner() return tip.owner end
 function FakeTooltip:IsShown() return tip.shown end
-function FakeTooltip:ClearAllPoints() end
-function FakeTooltip:SetPoint() end
+function FakeTooltip:ClearAllPoints() tip.point = nil end
+-- Only the point of the tooltip that is anchored, to tell right of a frame from left.
+function FakeTooltip:SetPoint(point) tip.point = point end
+-- Seven pixels a character of the last line added.
+function FakeTooltip:GetWidth() return #(tip.text or "") * 7 end
+function FakeTooltip:GetEffectiveScale() return 1 end
 function FakeTooltip:Show() tip.shown = true end
 function FakeTooltip:Hide() tip.shown = false end
-function GetAppropriateTooltip() return FakeTooltip end
 function GameTooltip_SetTitle(_, t) tip.title = t end
 function GameTooltip_AddNormalLine(_, t) tip.text = t end
 

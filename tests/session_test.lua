@@ -1,7 +1,11 @@
 -- The edit mode session against Blizzard's real call sequences: saving,
--- cancelling, Revert All, reverting one frame, ticking not being a change,
--- presets being read only, a new layout made by saving on a preset, importing,
--- renaming, deleting, the parked look and switching layouts.
+-- cancelling, Revert All, reverting one frame, giving the frame to a layout and
+-- taking it away as changes like any other, editing the addon's own settings
+-- while no layout owns the frame, presets being read only, saving only those on a
+-- preset without a new layout, a new layout made by saving on a preset,
+-- importing, renaming, deleting, the parked look, switching layouts, the panel
+-- checkbox only showing and hiding the frame, and the dialog's layout specific
+-- row.
 --
 -- The edit mode manager below copies the order in which Blizzard_EditMode calls
 -- things, because the library's correctness depends on that order: MakeNewLayout
@@ -10,11 +14,14 @@
 
 local here = debug.getinfo(1, "S").source:sub(2):match("^(.*)[/\\]") or "."
 dofile(here .. "/stubs.lua")
-local Stub, Trigger, RunTimers = STUB.Stub, STUB.Trigger, STUB.RunTimers
+local Stub, Trigger, RunTimers, slot = STUB.Stub, STUB.Trigger, STUB.RunTimers, STUB.slot
 
 --------------------------------------------------------------------------------
 -- Edit mode manager, modelled on Blizzard_EditMode/Shared/EditModeManager.lua
 --------------------------------------------------------------------------------
+
+-- One of Blizzard's own systems, whose unsaved change the test switches on.
+local systemChanged = false
 
 local M = {
   layoutInfo = {
@@ -27,6 +34,7 @@ local M = {
     },
   },
   hasActiveChanges = false,
+  registeredSystemFrames = { { HasActiveChanges = function() return systemChanged end } },
 }
 EditModeManagerFrame = M
 
@@ -43,10 +51,20 @@ function M:GetActiveLayoutInfo()
   return self.layoutInfo and self.layoutInfo.layouts[self.layoutInfo.activeLayout]
 end
 function M:SetHasActiveChanges(v) self.hasActiveChanges = v and true or false end
-function M:CheckForSystemActiveChanges() self:SetHasActiveChanges(false) end
-function M:ClearSelectedSystem() end
+function M:CheckForSystemActiveChanges()
+  local changed = false
+  for _, systemFrame in ipairs(self.registeredSystemFrames) do
+    if systemFrame:HasActiveChanges() then changed = true end
+  end
+  self:SetHasActiveChanges(changed)
+end
+local clearedSystems = 0
+function M:ClearSelectedSystem() clearedSystems = clearedSystems + 1 end
+-- Blizzard's settings dialog, attached to a system while one is selected.
+EditModeSystemSettingsDialog = {}
 function M:SelectSystem() end
-function M:UpdateLayoutInfo() end
+-- Applies the saved layouts, which clears every unsaved change.
+function M:UpdateLayoutInfo() self:SetHasActiveChanges(false) end
 
 function M:SaveLayouts()
   self.hasActiveChanges = false
@@ -115,6 +133,15 @@ do
   M.RevertAllChangesButton:SetScript("OnClick", function() revert(M) end)
 end
 
+-- Save, and the dialog Blizzard shows on leaving with unsaved changes, whose Exit
+-- button is counted rather than leaving.
+M.SaveChangesButton = Stub()
+local proceeded = 0
+EditModeUnsavedChangesDialog = Stub()
+EditModeUnsavedChangesDialog.SaveAndProceedButton = Stub()
+EditModeUnsavedChangesDialog.ProceedButton = Stub()
+function EditModeUnsavedChangesDialog.ProceedButton:Click() proceeded = proceeded + 1 end
+
 local function EnterEditMode() Trigger("EditMode.Enter") end
 local function ClickRevertAll()
   M.RevertAllChangesButton:GetScript("OnClick")(M.RevertAllChangesButton)
@@ -123,6 +150,11 @@ end
 local function ExitAndSave() M:SaveLayouts(); Trigger("EditMode.Exit") end
 local function ExitAndDiscard() M:RevertAllChanges(); Trigger("EditMode.Exit") end
 local function Switch(i) M:SelectLayout(i); NextFrame() end
+local function SwitchTo(name)
+  for i, l in ipairs(M.layoutInfo.layouts) do
+    if l.layoutName == name then Switch(i) return end
+  end
+end
 
 UnitName = function() return "Tester" end
 GetRealmName = function() return "Realm" end
@@ -143,6 +175,9 @@ local bar = setmetatable({}, {
   __newindex = function(_, k, v) over[k] = v end,
 })
 local function ResetBar() for k in pairs(over) do over[k] = nil end end
+-- What the user's own settings menu does with a change while no layout owns the
+-- bar, which is how the library hands them over on Save.
+local function EditOwn(key, value) own[key] = value; over[key] = nil end
 
 local storage = {}
 local barFrame = Stub()
@@ -150,11 +185,14 @@ function barFrame:IsMouseEnabled() return true end
 function barFrame:EnableMouse() end
 function barFrame:GetFrameStrata() return "MEDIUM" end
 
+local previewing = false
+
 LLS:RegisterFrame("Bar", {
   GetFrame = function() return barFrame end,
   displayName = "Bar",
   storage = storage,
   settings = {
+    { type = "layoutSpecific", name = "Layout Specific" },
     { key = "width", name = "Width", type = "slider", minValue = 40, maxValue = 1000 },
     { key = "color", name = "Color", type = "dropdown", options = {} },
     { type = "revert" },
@@ -162,8 +200,11 @@ LLS:RegisterFrame("Bar", {
   RestoreOwnSettings = ResetBar,
   GetSetting = function(key) return bar[key] end,
   SetSetting = function(key, value) bar[key] = value end,
+  EditSetting = EditOwn,
   GetPosition = function() return bar.p, bar.rp, bar.x, bar.y end,
   SetPosition = function(p, rp, x, y) bar.p, bar.rp, bar.x, bar.y = p, rp, x, y end,
+  EditPosition = function(p, rp, x, y) EditOwn("p", p); EditOwn("rp", rp); EditOwn("x", x); EditOwn("y", y) end,
+  OnPreview = function(shown) previewing = shown end,
 })
 
 local info = LLS.registrations.Bar
@@ -172,13 +213,6 @@ local info = LLS.registrations.Bar
 local function Edit(key, value)
   bar[key] = value
   LLS:Capture("Bar")
-end
-
-local function keys()
-  local out = {}
-  for k, v in pairs(storage) do out[#out + 1] = k .. (v.inactive and "(parked)" or "") end
-  table.sort(out)
-  return table.concat(out, " ")
 end
 
 local failures, count = 0, 0
@@ -194,10 +228,13 @@ print("== saving ==")
 M:UpdateLayoutInfo()                       -- the layouts arrive after login
 EnterEditMode()
 LLS:SetManaged("Bar", true)
+Check("giving A the bar is a change to save", M.hasActiveChanges and LLS:HasChanges("Bar"))
+Check("kept back until Save", storage["1:A"] == nil)
 Edit("width", 555)
-Check("the save button lights", M.hasActiveChanges)
 ExitAndSave()
-Check("A keeps the width", storage["1:A"] and storage["1:A"].settings.width == 555)
+Check("A keeps the bar and the width", storage["1:A"] and not storage["1:A"].inactive
+  and storage["1:A"].settings.width == 555)
+Check("and the user's own width is untouched", own.width == 300)
 EnterEditMode()
 Check("and still has it next session", bar.width == 555 and LLS:IsManaged("Bar"))
 Trigger("EditMode.Exit")
@@ -224,48 +261,78 @@ LLS:RevertFrame("Bar")
 Check("the colour goes back", bar.color == "blue")
 Check("and there is nothing left", not LLS:HasChanges("Bar"))
 
-print("== ticking is not a change, and no revert undoes it ==")
+print("== giving the bar up is a change too ==")
 M.hasActiveChanges = false
 LLS:SetManaged("Bar", false)
-Check("unticked hands the bar back", bar.width == 300 and not LLS:IsManaged("Bar"))
-Check("without lighting the save button", not M.hasActiveChanges)
-Check("and is kept at once, parked", storage["1:A"].inactive and storage["1:A"].settings.width == 555)
+Check("the bar wears the user's own settings", bar.width == 300 and not LLS:IsManaged("Bar"))
+Check("and the save button lights", M.hasActiveChanges)
+Check("but A owns it until Save", not storage["1:A"].inactive)
 ClickRevertAll()
-Check("Revert All leaves it unticked", not LLS:IsManaged("Bar") and bar.width == 300)
-Trigger("EditMode.Exit")
-EnterEditMode()                            -- a session that finds A parked
-LLS:SetManaged("Bar", true)
-Check("ticking again brings the look back", bar.width == 555 and not storage["1:A"].inactive)
-Check("still without lighting the save button", not M.hasActiveChanges)
-Edit("width", 560)
-ClickRevertAll()
-Check("Revert All returns to the look the tick brought", bar.width == 555 and LLS:IsManaged("Bar"))
+Check("Revert All gives it back to A", LLS:IsManaged("Bar") and bar.width == 555)
+Check("with nothing left to save", not M.hasActiveChanges)
 Edit("width", 560)
 LLS:SetManaged("Bar", false)
-Check("unticking over an edit keeps it a change", M.hasActiveChanges and LLS:HasChanges("Bar"))
-ClickRevertAll()
+Check("an edit made before giving it up is still a change", LLS:HasChanges("Bar"))
+ExitAndSave()
+Check("saved, A keeps its look parked, the edit included", storage["1:A"].inactive
+  and storage["1:A"].settings.width == 560)
+Check("and the bar wears the user's own settings", bar.width == 300 and next(over) == nil)
+EnterEditMode()                            -- a session that finds A parked
 LLS:SetManaged("Bar", true)
-Check("which reverting drops", bar.width == 555)
-Trigger("EditMode.Exit")
+Check("taking it back brings the parked look back", bar.width == 560)
+ExitAndDiscard()
+Check("which leaving without saving undoes", not LLS:IsManaged("Bar") and bar.width == 300
+  and storage["1:A"].inactive and next(over) == nil)
+EnterEditMode()
+LLS:SetManaged("Bar", true)
+Edit("width", 555)
+ExitAndSave()
+Check("saved, A owns the bar again", not storage["1:A"].inactive and bar.width == 555)
 
-print("== ticking a layout that owned nothing, then discarding ==")
+print("== giving a layout that owned nothing the bar, then discarding ==")
 Switch(3)                                  -- B
 Check("B shows the bar's own settings", bar.width == 300)
 EnterEditMode()
 LLS:SetManaged("Bar", true)
-Check("B owns the bar at once", storage["1:B"] and not storage["1:B"].inactive)
-Check("with nothing for the frame's own revert button to undo", not LLS:HasChanges("Bar"))
+Check("B owns the bar for the session", LLS:IsManaged("Bar") and storage["1:B"] == nil)
+Check("which its revert button can undo", LLS:HasChanges("Bar"))
 Edit("width", 999)
 ExitAndDiscard()
-Check("the edit is gone", bar.width == 300)
-Check("but the tick stays", LLS:IsManaged("Bar") and storage["1:B"].settings.width == 300)
-LLS:SetManaged("Bar", false)               -- from the settings menu
+Check("the edit and the tick are both gone", bar.width == 300 and storage["1:B"] == nil
+  and not LLS:IsManaged("Bar"))
+Check("with no override left pinned", next(over) == nil)
+LLS:SetManaged("Bar", true)                -- from the settings menu
+Check("from the settings menu it takes effect at once", storage["1:B"] and not storage["1:B"].inactive)
+LLS:SetManaged("Bar", false)
 -- The real test of "handed back": no override is left behind, so a later change
 -- to the user's own settings shows through.
 Check("unticked, no override is left pinned", next(over) == nil)
 own.width = 350
 Check("so a later change of the user's own shows", bar.width == 350)
 own.width = 300
+
+print("== while no layout owns the bar, edit mode edits the user's own settings ==")
+EnterEditMode()                            -- on B, which has its look parked
+LLS:SelectFrame("Bar")
+Check("the bar can be selected", LLS.selected == info)
+Edit("width", 420)
+Check("it shows the change", bar.width == 420)
+Check("held back until Save", own.width == 300 and M.hasActiveChanges and LLS:HasChanges("Bar"))
+Check("and B is given nothing", storage["1:B"].inactive)
+ExitAndDiscard()
+Check("leaving without saving drops it", bar.width == 300 and own.width == 300 and next(over) == nil)
+EnterEditMode()
+Edit("width", 420)
+Edit("x", 15)
+LLS:RevertFrame("Bar")
+Check("reverting the frame drops it too", bar.width == 300 and bar.x == 0 and not LLS:HasChanges("Bar"))
+Edit("width", 420)
+Edit("x", 15)
+ExitAndSave()
+Check("Save hands it to the user's own settings", own.width == 420 and own.x == 15)
+Check("with no override left pinned", next(over) == nil)
+Check("and nothing stored for B", storage["1:B"].inactive and storage["1:B"].settings.width == 300)
+own.width, own.x = 300, 0
 
 print("== a preset is read only outside edit mode ==")
 Switch(1)                                  -- Modern
@@ -274,21 +341,55 @@ Check("and the addon can tell why", LLS:IsPresetActive())
 LLS:SetManaged("Bar", true)                -- from the settings menu
 Check("so ticking is refused", storage["0:Modern"] == nil and not LLS:IsManaged("Bar"))
 
-print("== on a preset, a tick alone is not a change ==")
+print("== on a preset, giving it the bar takes a new layout ==")
 EnterEditMode()
 Check("in edit mode it can be ticked", LLS:CanManage())
-M.hasActiveChanges = false
 LLS:SetManaged("Bar", true)
-Check("ticking does not light the save button", not M.hasActiveChanges)
-Check("nor writes the preset", storage["0:Modern"] == nil)
+Check("as a change to save", M.hasActiveChanges and LLS:IsManaged("Bar"))
+Check("which writes nothing to the preset", storage["0:Modern"] == nil)
 Edit("width", 432)
-Check("an edit does", M.hasActiveChanges)
 ClickRevertAll()
-Check("Revert All drops the edit", bar.width == 300)
-Check("and keeps the tick", LLS:IsManaged("Bar"))
+Check("Revert All drops the edit and the tick", bar.width == 300 and not LLS:IsManaged("Bar"))
 ExitAndDiscard()
-Check("leaving drops the tick with the session", not LLS:IsManaged("Bar") and storage["0:Modern"] == nil)
-Check("and pins no override", next(over) == nil)
+Check("and leaving leaves nothing behind", storage["0:Modern"] == nil and next(over) == nil)
+
+print("== on a preset, the user's own settings alone are saved without a new layout ==")
+EnterEditMode()
+local saveCover, saveExitCover = LLS.saveCover, LLS.saveExitCover
+Check("Save is not covered while there is nothing to save", saveCover and not saveCover:IsShown())
+Edit("width", 404)
+Check("it is once the user's own settings are all that changed",
+  saveCover:IsShown() and saveExitCover:IsShown())
+systemChanged = true
+M:CheckForSystemActiveChanges()
+Check("but not while one of Blizzard's systems has a change too", not saveCover:IsShown())
+systemChanged = false
+M:CheckForSystemActiveChanges()
+Check("and is again once that is gone", saveCover:IsShown())
+LLS:SetManaged("Bar", true)
+Check("nor while the preset is being given the bar", not saveCover:IsShown())
+LLS:SetManaged("Bar", false)
+Check("taking it away again at once is as if it never happened",
+  bar.width == 404 and saveCover:IsShown() and storage["0:Modern"] == nil)
+local layoutCount = #M.layoutInfo.layouts
+saveCover:GetScript("OnClick")()
+Check("pressing Save hands them to the user's own settings", own.width == 404 and next(over) == nil)
+Check("without making a layout", #M.layoutInfo.layouts == layoutCount and storage["0:Modern"] == nil)
+Check("and leaves nothing to save", not M.hasActiveChanges and not saveCover:IsShown())
+Edit("width", 405)
+EditModeUnsavedChangesDialog:Show()
+saveExitCover:GetScript("OnClick")()
+Check("Save and Exit saves them too", own.width == 405)
+Check("then presses Exit", proceeded == 1)
+Edit("width", 406)
+STUB.inCombat = true
+saveExitCover:GetScript("OnClick")()
+STUB.inCombat = false
+Check("in combat it saves", own.width == 406)
+Check("and leaves the dialog for the player to leave", proceeded == 1)
+ExitAndDiscard()
+Check("leaving takes the covers away", not saveCover:IsShown() and not saveExitCover:IsShown())
+own.width = 300
 
 print("== saving under a preset makes a new layout ==")
 EnterEditMode()
@@ -333,7 +434,6 @@ Trigger("EditMode.Exit")
 
 print("== renaming ==")
 Switch(2)                                  -- A
-local before = keys()
 M:RenameLayout(2, "A2")
 NextFrame()
 Check("the entry moved to the new name", storage["1:A2"] and storage["1:A2"].settings.width == 555)
@@ -368,7 +468,7 @@ Check("a deleted layout's entry is gone", storage["1:Layout 2"] == nil)
 Check("and A3 survives it", storage["1:A3"].settings.width == 620)
 
 print("== the parked look ==")
-for i, l in ipairs(M.layoutInfo.layouts) do if l.layoutName == "A3" then Switch(i) break end end
+SwitchTo("A3")
 Check("on A3", bar.width == 620)
 LLS:SetManaged("Bar", false)               -- out of edit mode, from the settings menu
 Check("parked, not dropped", storage["1:A3"] and storage["1:A3"].inactive)
@@ -377,15 +477,120 @@ LLS:SetManaged("Bar", true)
 Check("ticking again brings the look back", bar.width == 620 and not storage["1:A3"].inactive)
 
 print("== switching layouts ==")
-for i, l in ipairs(M.layoutInfo.layouts) do if l.layoutName == "B" then Switch(i) break end end
+SwitchTo("B")
 Check("a layout owning nothing shows the own settings", bar.width == 300)
-for i, l in ipairs(M.layoutInfo.layouts) do if l.layoutName == "A3" then Switch(i) break end end
+SwitchTo("A3")
 Check("and back again shows the layout's", bar.width == 620)
 
-print("== character layouts carry the character ==")
-for i, l in ipairs(M.layoutInfo.layouts) do if l.layoutName == "Mine" then Switch(i) break end end
+print("== the same layout applied again mid session ==")
+EnterEditMode()
+Edit("width", 630)
+Check("an edit lights Save", M.hasActiveChanges)
+M:UpdateLayoutInfo()                       -- a spec change, say
+NextFrame()
+Check("drops the edits waiting for Save, as Blizzard drops its own",
+  bar.width == 620 and not LLS:HasChanges("Bar") and not M.hasActiveChanges)
+Trigger("EditMode.Exit")
+
+print("== the panel checkbox only shows and hides the bar ==")
+EnterEditMode()
+Check("shown in edit mode to begin with", LLS:IsShownInEditMode("Bar") and previewing)
+M.hasActiveChanges = false
+LLS:SetShownInEditMode("Bar", false)
+Check("hiding it takes its preview away", not previewing)
+Check("is no change to save", not M.hasActiveChanges)
+Check("and leaves A3 owning it", LLS:IsManaged("Bar") and bar.width == 620)
+LLS:SelectFrame("Bar")
+Check("a hidden bar cannot be selected", LLS.selected == nil)
+LLS:SetShownInEditMode("Bar", true)
+LLS:SelectFrame("Bar")
+Check("shown again, it can", LLS.selected == info and previewing)
+LLS:SetShownInEditMode("Bar", false)
+Check("and hiding it puts its dialog away", LLS.selected == nil)
+LLS:SetShownInEditMode("Bar", true)
+Trigger("EditMode.Exit")
+
+print("== the dialog's layout specific row ==")
+EnterEditMode()
+LLS:SelectFrame("Bar")
+Check("is ticked while A3 owns the bar", LLS.dialog.rows.layoutSpecific[1].checked)
+LLS.dialog.rows.layoutSpecific[1]:OnCheckButtonClick()
+Check("unticking hands the bar back", not LLS:IsManaged("Bar") and bar.width == 300)
+Check("with the dialog staying open on it", LLS.selected == info)
+Check("and the redrawn row shows it", LLS.dialog.rows.layoutSpecific[1].checked == false)
+LLS.dialog.rows.layoutSpecific[1]:OnCheckButtonClick()
+Check("ticking again brings A3's look back", LLS:IsManaged("Bar") and bar.width == 620)
+Check("with nothing left to save", not M.hasActiveChanges and not LLS:HasChanges("Bar"))
+ExitAndDiscard()
+
+print("== the dialog's arrow keys ==")
+EnterEditMode()
+LLS:SelectFrame("Bar")
+local dialog = LLS.dialog
+local y = bar.y
+dialog:GetScript("OnKeyDown")(dialog, "UP")
+Check("an arrow key nudges the bar", bar.y == y + 1)
+Check("and is not passed on", slot(dialog).propagate == false)
+dialog:GetScript("OnKeyUp")(dialog, "UP")
+Check("until it is let go", slot(dialog).propagate == true)
+dialog:GetScript("OnKeyDown")(dialog, "A")
+Check("any other key is passed on", slot(dialog).propagate == true)
+STUB.inCombat = true
+local ok = pcall(dialog:GetScript("OnKeyDown"), dialog, "UP")
+Check("in combat a key is left alone, without an error", ok and bar.y == y + 1)
+ok = pcall(dialog:GetScript("OnKeyUp"), dialog, "UP")
+Check("letting go of it too", ok and slot(dialog).propagate == true)
+STUB.inCombat = false
+ExitAndDiscard()
+
+print("== selecting the bar in combat ==")
+EnterEditMode()
+clearedSystems = 0
+LLS:SelectFrame("Bar")
+Check("out of combat Blizzard is asked to put its selection away", clearedSystems == 1 and LLS.selected == info)
+LLS:ClearSelection()
+STUB.inCombat = true
+clearedSystems = 0
+LLS:SelectFrame("Bar")
+Check("in combat it is not asked, which would touch protected frames",
+  clearedSystems == 0 and LLS.selected == info)
+LLS:ClearSelection()
+EditModeSystemSettingsDialog.attachedToSystem = {}
+LLS:SelectFrame("Bar")
+Check("and while one of Blizzard's systems is selected, the bar is not", LLS.selected == nil)
+EditModeSystemSettingsDialog.attachedToSystem = nil
+STUB.inCombat = false
+ExitAndDiscard()
+
+print("== a layout given the bar takes the edits made for it ==")
+SwitchTo("Mine")
+EnterEditMode()
+Edit("width", 333)
 LLS:SetManaged("Bar", true)
-Check("keyed with name and realm", storage["2:Tester - Realm:Mine"] ~= nil)
+Check("the bar keeps what it was wearing", bar.width == 333 and LLS:IsManaged("Bar"))
+Edit("width", 334)
+LLS:SetManaged("Bar", false)
+Check("changed since, taking it away parks Mine's look", bar.width == 300 and LLS:HasChanges("Bar"))
+LLS:SetManaged("Bar", true)
+Check("which giving it back brings back", bar.width == 334)
+ExitAndSave()
+Check("Mine has it, keyed with name and realm", storage["2:Tester - Realm:Mine"]
+  and storage["2:Tester - Realm:Mine"].settings.width == 334)
+Check("and the user's own settings do not", own.width == 300)
+
+print("== a new layout made on a preset hands the user's edits to their settings ==")
+SwitchTo("Modern")
+EnterEditMode()
+Edit("width", 410)
+systemChanged = true                       -- so Save has to make a layout
+M:CheckForSystemActiveChanges()
+M:MakeNewLayout({}, 1, "Layout 3", false)
+NextFrame()
+systemChanged = false
+Check("the user's own settings take the edit", own.width == 410 and bar.width == 410)
+Check("and the new layout owns nothing", storage["1:Layout 3"] == nil)
+Trigger("EditMode.Exit")
+Check("with no override left pinned", next(over) == nil)
 
 print("")
 print(string.format("%d checks, %s", count,

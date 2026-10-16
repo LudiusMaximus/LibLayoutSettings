@@ -13,10 +13,11 @@ layout copy of position and settings in the addon's saved variables.
 
 What the library provides:
   - a panel next to the edit mode manager with one checkbox per registered frame,
+    which shows or hides the frame in edit mode, as Blizzard's own do,
   - Blizzard's selection glow on the frame while edit mode is active,
   - dragging the frame by that glow, and nudging it with the arrow keys,
   - a settings dialog of slider, checkbox, dropdown, colour, text, button,
-    separator, revert, reset position and action rows,
+    separator, revert, reset position, action and layout specific rows,
   - copying one layout's stored look onto another,
   - the same rows on a settings page of the addon's own, outside edit mode,
   - save, cancel and revert semantics that match Blizzard's, including creating a
@@ -26,19 +27,21 @@ What the library provides:
   LLS:RegisterFrame("MyBar", { frame = myBar, displayName = "My Addon",
     storage = MyAddonDB.editModeLayouts, settings = { ... }, ... })
 
-Ticking a layout's checkbox stores the frame's current position and settings for
-that layout, so switching to it later restores them. A layout that does not own
-the frame hands it back to the addon's own settings, and unticking keeps the
-layout's look parked, so that ticking again brings it back. Like Blizzard's own
-checkboxes on that panel, ticking and unticking take effect at once: they are not
-a change to save, and no revert undoes them.
+A frame either belongs to the active layout, which then keeps its own position
+and settings for it, or wears the addon's own settings, which every layout not
+owning it shares. The layout specific row in the settings dialog switches between
+the two. Edit mode changes whichever of them the frame is wearing, and either way
+nothing is kept until Save, exactly like a change to one of Blizzard's systems.
+Giving a layout the frame or taking it away is such a change too. A layout that
+gives the frame up keeps its look parked, so that taking it back brings that look
+back.
 
 README.md is the reference: every registration field, every setting descriptor
 field and the public API are described there, and only there, so that the two
 cannot drift apart.
 ]]
 
-local MAJOR, MINOR = "LibLayoutSettings-1.0", 1
+local MAJOR, MINOR = "LibLayoutSettings-1.0", 2
 
 assert(LibStub, MAJOR .. " requires LibStub.")
 
@@ -205,8 +208,8 @@ local function CurrentEntry(info)
   return key and info.storage[key] or nil
 end
 
--- A layout keeps a frame's look even while it is not using it, so that unticking
--- the checkbox and ticking it again brings that look back rather than capturing
+-- A layout keeps a frame's look even while it is not using it, so that giving
+-- the frame up and taking it back brings that look back rather than capturing
 -- whatever happens to be on screen in between. An entry without the flag is in
 -- use, which is what every entry written before this existed is.
 local function IsActiveEntry(entry)
@@ -222,21 +225,63 @@ end
 local function ApplyOrRestore(info, entry)
   if IsActiveEntry(entry) then
     ApplyEntry(info, entry)
-  elseif info.RestoreOwnSettings then
+  else
     info.RestoreOwnSettings()
   end
 end
 
--- Whether this frame's look differs from where the player started editing it.
--- Ticking or unticking the checkbox is not a change (see SetManaged), so it moves
--- the mark along with it rather than counting against it.
---
--- Both sides may be nil, which is a frame no layout owned and still does not.
+-- While edit mode is open, a frame no layout owns is still edited there, but on
+-- behalf of the addon's own settings: ownBaseline is how those were when the
+-- session started or last saved, ownPending how they are with the session's edits.
+-- The edits are worn as overrides, the way a layout's look is, and only reach the
+-- addon through EditSetting and EditPosition on Save. Taken when the frame first
+-- wears its own settings in a session, so a frame some layout owns throughout
+-- never needs them.
+local function TakeOwnLook(info)
+  if not info.ownBaseline then
+    info.ownBaseline = CaptureEntry(info)
+    info.ownPending = CopyTable(info.ownBaseline)
+  end
+end
+
+-- Hands the frame back to the addon's own settings, with whatever this session
+-- has changed about them still on it.
+local function ShowOwnLook(info)
+  info.RestoreOwnSettings()
+  if info.ownBaseline then
+    if not SameValue(info.ownPending, info.ownBaseline) then
+      ApplyEntry(info, info.ownPending)
+    end
+  else
+    TakeOwnLook(info)
+  end
+end
+
+-- What an edit changes right now: the active layout's entry while it owns the
+-- frame, and otherwise the addon's own settings, which during a session are held
+-- back in ownPending. Outside edit mode there is nothing to hold an edit back, so
+-- only an owning layout's stored entry is returned.
+local function EditTarget(info)
+  if not lib.sessionKey then
+    local entry = CurrentEntry(info)
+    return IsActiveEntry(entry) and entry or nil
+  end
+  if IsActiveEntry(info.pending) then
+    return info.pending
+  end
+  TakeOwnLook(info)
+  return info.ownPending
+end
+
+-- Whether this session has changed the frame: its look, whether the layout owns
+-- it, or the addon's own settings. Each side may be nil, which is a frame no
+-- layout owned and still does not, or own settings never touched.
 local function HasChanges(info)
   if not lib.sessionKey then
     return false
   end
-  return not SameValue(info.pending, info.revertPoint)
+  return not SameValue(info.pending, info.baseline)
+    or not SameValue(info.ownPending, info.ownBaseline)
 end
 
 -- Where the addon says the frame belongs when nothing has moved it. Optional: a
@@ -329,13 +374,16 @@ end
 --------------------------------------------------------------------------------
 -- Blizzard reverts everything on exit unless the player pressed Save, so edits go
 -- into a pending copy first. baseline is what the layout held when the session
--- started, live is how the frame looked, which is what a cancel has to restore.
--- A tick or untick is not an edit, so it moves both along with it (see SetManaged).
+-- started or last saved, live is how the frame looked then, which is what a
+-- cancel has to restore. The addon's own settings are held back the same way, in
+-- ownBaseline and ownPending (see TakeOwnLook).
 
 -- Set between Blizzard's revert and the frame after it. See ScheduleRevert.
 local revertScheduled = false
 local revertSnapshot
 local ConsumeRevert
+
+local RefreshSaveCovers, BuildSaveCovers
 
 local function BeginSession(key)
   lib.sessionKey = key
@@ -344,8 +392,11 @@ local function BeginSession(key)
     local stored = key and info.storage[key] or nil
     info.baseline = stored and CopyTable(stored) or nil
     info.pending = stored and CopyTable(stored) or nil
-    info.revertPoint = stored and CopyTable(stored) or nil
     info.live = CaptureEntry(info)
+    info.ownBaseline, info.ownPending, info.given = nil, nil, nil
+    if not IsActiveEntry(stored) then
+      TakeOwnLook(info)
+    end
   end
   RefreshButtonStates()
 end
@@ -354,8 +405,86 @@ local function EndSession()
   lib.sessionKey = nil
   for _, regKey in ipairs(order) do
     local info = registrations[regKey]
-    info.baseline, info.pending, info.revertPoint, info.live = nil, nil, nil, nil
+    info.baseline, info.pending, info.live = nil, nil, nil
+    info.ownBaseline, info.ownPending, info.given = nil, nil, nil
   end
+end
+
+-- Hands what the session changed about the addon's own settings to the addon,
+-- through EditSetting and EditPosition, one changed value at a time. While they
+-- run the frame counts as owned by no layout and not in edit mode (see
+-- lib:IsManaged and lib:IsEditing), so that they land in the addon's own settings
+-- whatever the frame is wearing. That may well clear the frame's overrides, so
+-- the caller puts on whatever it should be wearing afterwards.
+local function WriteOwnSettings(info, from, to)
+  if not to or SameValue(from, to) then
+    return
+  end
+
+  lib.writingOwn = true
+
+  local position = to.position
+  if position and position.point and not SameValue(from and from.position, position) then
+    info.EditPosition(position.point, position.relativePoint, position.x, position.y)
+  end
+  for _, setting in ipairs(info.settings) do
+    local key = setting.key
+    local value = key and to.settings[key]
+    if value ~= nil and not SameValue(from and from.settings[key], value) then
+      info.EditSetting(key, CopyValue(value))
+    end
+  end
+
+  lib.writingOwn = false
+end
+
+-- Saves the session's edits to the addon's own settings, and from then on those
+-- are what a revert goes back to.
+local function CommitOwnSettings(info)
+  if not info.ownPending or SameValue(info.ownPending, info.ownBaseline) then
+    return
+  end
+  WriteOwnSettings(info, info.ownBaseline, info.ownPending)
+  info.ownBaseline = CopyTable(info.ownPending)
+  ApplyOrRestore(info, info.pending)
+end
+
+local function AnyChanges()
+  for _, regKey in ipairs(order) do
+    if HasChanges(registrations[regKey]) then
+      return true
+    end
+  end
+  return false
+end
+
+-- Blizzard's save button only lights up for its own systems, so it has to be told
+-- about the changes here as well, and greyed out again once there are none left.
+-- Only told when there is something to tell: Blizzard reads that flag when edit
+-- mode closes, and anything written to it from here is an addon's, so a session
+-- that changed nothing here leaves it alone.
+local function UpdateDirty()
+  local wasDirty = lib.dirty
+  lib.dirty = lib.sessionKey ~= nil and AnyChanges()
+  if lib.sessionKey then
+    if lib.dirty then
+      EditModeManagerFrame:SetHasActiveChanges(true)
+    elseif wasDirty then
+      -- The last change here is gone, so Save greys out again, unless one of
+      -- Blizzard's own systems still has one. Blizzard works that out, and the
+      -- hook on it adds ours (see OnCheckActiveChanges).
+      EditModeManagerFrame:CheckForSystemActiveChanges()
+    end
+  end
+  RefreshButtonStates()
+  RefreshSaveCovers()
+end
+
+-- After Blizzard has saved or reverted everything, which clears its own flag.
+local function ClearDirty()
+  lib.dirty = false
+  RefreshButtonStates()
+  RefreshSaveCovers()
 end
 
 local function CommitSession()
@@ -367,30 +496,22 @@ local function CommitSession()
   end
 
   -- Blizzard also saves for a rename or a deletion while a preset is active, and
-  -- leaves the edits made on the preset unsaved. These stay pending alongside them.
+  -- leaves the edits made on the preset unsaved. These stay pending alongside
+  -- them, the addon's own settings included, as nobody pressed Save for them.
   local key = lib.sessionKey
   if not key or IsPresetKey(key) then
     return
   end
   for _, regKey in ipairs(order) do
     local info = registrations[regKey]
+    CommitOwnSettings(info)
     info.storage[key] = info.pending and CopyTable(info.pending) or nil
     info.baseline = info.pending and CopyTable(info.pending) or nil
-    info.revertPoint = info.pending and CopyTable(info.pending) or nil
     info.live = CaptureEntry(info)
+    -- Saved, so taking the frame away again parks its look like any other.
+    info.given = nil
   end
-  lib.dirty = false
-  RefreshButtonStates()
-end
-
--- Blizzard's save button only lights up for its own systems, so it has to be told
--- that there is something to save here as well.
-local function MarkDirty()
-  lib.dirty = true
-  if lib.sessionKey and IsSupported() then
-    EditModeManagerFrame:SetHasActiveChanges(true)
-  end
-  RefreshButtonStates()
+  ClearDirty()
 end
 
 -- Every way the frame can be moved ends here: dragging it, nudging it with an
@@ -398,12 +519,23 @@ end
 local function CommitPosition(info, point, relativePoint, x, y)
   info.SetPosition(point, relativePoint, x, y)
 
-  local entry = CurrentEntry(info)
+  local entry = EditTarget(info)
   if entry then
     entry.position = { point = point, relativePoint = relativePoint, x = x, y = y }
   end
 
-  MarkDirty()
+  UpdateDirty()
+end
+
+-- Whether the frame shows in edit mode at all, which the panel's checkbox decides
+-- the way Blizzard's own on that panel do. Nothing else depends on it: hidden,
+-- the frame is still whatever the layout makes it. Kept by the addon where it
+-- offers to, and otherwise only until the next reload.
+local function ShownInEditMode(info)
+  if info.IsShownInEditMode then
+    return info.IsShownInEditMode() ~= false
+  end
+  return info.shownInEditMode ~= false
 end
 
 
@@ -549,8 +681,10 @@ local function BuildOverlay(info)
     lib:SelectFrame(info.key)
   end)
 
+  -- Only while a session can hold the move. Under an override layout there is
+  -- none, as nothing is ever stored for one.
   overlay:SetScript("OnDragStart", function()
-    if not IsManaged(info) then
+    if not lib.sessionKey then
       return
     end
     frame:SetMovable(true)
@@ -661,7 +795,7 @@ local function SetRowValue(host, info, setting, value)
   else
     info.SetSetting(setting.key, value)
 
-    local entry = CurrentEntry(info)
+    local entry = EditTarget(info)
     if entry then
       -- Copied, or the addon's store and the layout's entry would share one table
       -- and an in place edit on either side would silently change the other.
@@ -672,7 +806,7 @@ local function SetRowValue(host, info, setting, value)
       info.OnChanged()
     end
 
-    MarkDirty()
+    UpdateDirty()
   end
 
   -- Redraws so that any row this one greys out follows immediately. Never set on
@@ -693,6 +827,9 @@ local rowTemplates = {
   -- An action row is a dropdown that does something rather than holding a value,
   -- so it is the same row wearing a different job.
   actions = "EditModeSettingDropdownTemplate",
+  -- And the layout specific row is a checkbox whose value is whether the active
+  -- layout owns the frame, which the library keeps rather than the addon.
+  layoutSpecific = "EditModeSettingCheckboxTemplate",
 }
 
 local rowKinds = {
@@ -706,11 +843,16 @@ local rowKinds = {
   revert = true,
   resetPosition = true,
   actions = true,
+  layoutSpecific = true,
 }
 
 -- The three that are plain buttons, differing only in what the library puts on
 -- them and when it enables them.
 local rowIsButton = { button = true, revert = true, resetPosition = true }
+
+-- Rows that hold none of the addon's settings, and so have no key.
+local rowHasNoKey = { separator = true, button = true, revert = true, resetPosition = true,
+  actions = true, layoutSpecific = true }
 
 -- The control a row of each kind carries, for the wiring that has to reach past
 -- the row to the thing sitting on it. Named per kind rather than picked as the
@@ -720,6 +862,7 @@ local rowIsButton = { button = true, revert = true, resetPosition = true }
 local rowControl = {
   slider = "Slider",
   checkbox = "Button",
+  layoutSpecific = "Button",
   dropdown = "Dropdown",
   actions = "Dropdown",
   color = "Swatch",
@@ -770,11 +913,28 @@ local pairedLabelWidth = 130
 --
 -- It is placed off the right edge of the dialog, level with the row, so that it
 -- never covers the control being judged and never moves while the mouse travels
--- along the row. GameTooltip clamps itself to the screen, so a dialog dragged
--- against the right edge gets a tooltip that slides back into view rather than
--- one that disappears.
+-- along the row. Where the widest of the host's tooltips would not fit between
+-- the dialog and the right edge of the screen, a dialog dragged over there say,
+-- every one of them goes off the left edge instead, so that they do not switch
+-- sides from one row to the next. A tooltip clamps itself to the screen, so
+-- where one fits on neither side it slides back into view rather than
+-- disappearing.
+--
+-- The tooltip is the library's own rather than GameTooltip, which is anchored to
+-- whatever it was shown for last, and which in combat could not always be
+-- anchored to the dialog: SetPoint failed with an anchor family connection. This
+-- one is only ever anchored here, and no tooltip addon hooks it, so it can also be
+-- shown and hidden to measure the rows' tooltips without anyone noticing.
 
 local tooltipGap = 8
+
+-- Named, because the template names its text lines after it.
+local function RowTooltip()
+  if not lib.tooltip then
+    lib.tooltip = CreateFrame("GameTooltip", "LibLayoutSettingsTooltip", UIParent, "GameTooltipTemplate")
+  end
+  return lib.tooltip
+end
 
 -- The frame a host's rows are drawn on: the host itself, or for the edit mode
 -- dialog the canvas it scrolls. See BuildDialog.
@@ -799,6 +959,61 @@ local function RowOf(frame)
   return frame and (frame.libRow or frame) or nil
 end
 
+-- A row the library labels itself, a reset position row for instance, carries
+-- neither a name nor a text of its own, so the button says what it is.
+local function RowTooltipTitle(row)
+  local setting = row.libSetting
+  return setting.name or setting.text or (row.GetText and row:GetText()) or ""
+end
+
+local function FillTooltip(tooltip, row, text)
+  GameTooltip_SetTitle(tooltip, RowTooltipTitle(row))
+  GameTooltip_AddNormalLine(tooltip, text, true)
+end
+
+-- How wide the widest tooltip of a host's rows is, in tooltip units, measured by
+-- showing each one in turn in the tooltip, which is all over before anything is
+-- drawn. Once per drawing of the rows, which forgets it.
+local function WidestTooltip(host)
+  if host.libTooltipWidth then
+    return host.libTooltipWidth
+  end
+
+  local measure = RowTooltip()
+  local widest = 0
+  for _, pool in pairs(host.rows) do
+    for index = 1, (pool.used or 0) do
+      local row = pool[index]
+      local text = row.libSetting and RowTooltipText(row)
+      if text then
+        measure:SetOwner(UIParent, "ANCHOR_NONE")
+        measure:SetPoint("TOPLEFT", UIParent, "TOPLEFT")
+        FillTooltip(measure, row, text)
+        measure:Show()
+        widest = max(widest, measure:GetWidth() or 0)
+        measure:Hide()
+      end
+    end
+  end
+
+  host.libTooltipWidth = widest
+  return widest
+end
+
+-- Whether the host's widest tooltip, shown off the right edge of its canvas, ends
+-- before the right edge of the screen. In screen pixels, as the tooltip and the
+-- canvas need not share a scale.
+local function TooltipsFitRight(host, tooltip)
+  local canvas = CanvasOf(host)
+  local right, screen = canvas:GetRight(), UIParent:GetRight()
+  if not (right and screen) then
+    return true
+  end
+  return right * canvas:GetEffectiveScale()
+    + (tooltipGap + WidestTooltip(host)) * tooltip:GetEffectiveScale()
+    <= screen * UIParent:GetEffectiveScale()
+end
+
 local function ShowRowTooltip(frame)
   local row = RowOf(frame)
   local text = RowTooltipText(row)
@@ -806,7 +1021,7 @@ local function ShowRowTooltip(frame)
     return
   end
 
-  local tooltip = GetAppropriateTooltip()
+  local tooltip = RowTooltip()
 
   -- Already up for this row, because the mouse moved from the label onto the
   -- control or back. Left exactly where it is: re-anchoring it here is what made
@@ -815,19 +1030,22 @@ local function ShowRowTooltip(frame)
     return
   end
 
-  -- A row the library labels itself, a reset position row for instance, carries
-  -- neither a name nor a text of its own, so the button says what it is.
-  local setting = row.libSetting
-  local title = setting.name or setting.text
-    or (row.GetText and row:GetText()) or ""
+  -- Decided first, because the first time after the rows are drawn that means
+  -- measuring, which shows every row's tooltip in this one in turn.
+  local host = row.libHost
+  local fitsRight = TooltipsFitRight(host, tooltip)
 
   tooltip:SetOwner(row, "ANCHOR_NONE")
   tooltip:ClearAllPoints()
   -- Level with the row, from the offset the row was placed at, rather than from
   -- its rect: a row that has just been shown may not have been laid out yet.
-  tooltip:SetPoint("TOPLEFT", CanvasOf(row.libHost), "TOPRIGHT", tooltipGap, row.libOffsetY or 0)
-  GameTooltip_SetTitle(tooltip, title)
-  GameTooltip_AddNormalLine(tooltip, text, true)
+  local canvas, offsetY = CanvasOf(host), row.libOffsetY or 0
+  if fitsRight then
+    tooltip:SetPoint("TOPLEFT", canvas, "TOPRIGHT", tooltipGap, offsetY)
+  else
+    tooltip:SetPoint("TOPRIGHT", canvas, "TOPLEFT", -tooltipGap, offsetY)
+  end
+  FillTooltip(tooltip, row, text)
   tooltip:Show()
 end
 
@@ -855,7 +1073,7 @@ local function HideRowTooltip(frame)
     return
   end
 
-  local tooltip = GetAppropriateTooltip()
+  local tooltip = RowTooltip()
   if tooltip:GetOwner() == row then
     tooltip:Hide()
   end
@@ -1093,6 +1311,15 @@ local function AcquireRow(host, kind)
         SetRowValue(self.libHost, self.libInfo, self.libSetting, self.checked)
       end
     end
+
+  elseif kind == "layoutSpecific" then
+    -- SetManaged redraws every host showing the frame, this row included.
+    row.OnCheckButtonClick = function(self)
+      PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
+      if self.libInfo then
+        lib:SetManaged(self.libInfo.key, not IsManaged(self.libInfo))
+      end
+    end
   end
 
   if kind == "dropdown" or kind == "actions" then
@@ -1136,6 +1363,14 @@ local function SetupCheckbox(row, info, setting)
   -- The label font and the button's enabled state are SetRowEnabled's business.
   row.Label:SetText(setting.name)
   row.checked = info.GetSetting(setting.key) and true or false
+  row.Button:SetChecked(row.checked)
+end
+
+-- Ticked while the active layout owns the frame. In edit mode that is the
+-- session's pending state, outside of it what the layout has stored.
+local function SetupLayoutSpecific(row, info, setting)
+  row.Label:SetText(setting.name or "Layout Specific")
+  row.checked = IsManaged(info)
   row.Button:SetChecked(row.checked)
 end
 
@@ -1321,7 +1556,7 @@ local function ColorButton()
   end)
   button:SetScript("OnEnter", function(self)
     if self.libTooltip then
-      local tooltip = GetAppropriateTooltip()
+      local tooltip = RowTooltip()
       tooltip:SetOwner(self, "ANCHOR_RIGHT")
       GameTooltip_SetTitle(tooltip, self:GetText())
       GameTooltip_AddNormalLine(tooltip, self.libTooltip, true)
@@ -1329,7 +1564,7 @@ local function ColorButton()
     end
   end)
   button:SetScript("OnLeave", function(self)
-    GetAppropriateTooltip():Hide()
+    RowTooltip():Hide()
   end)
 
   lib.colorButton = button
@@ -1435,7 +1670,7 @@ local function SetRowEnabled(row, kind, enabled)
     SetLabelEnabled(row.Label, enabled)
   end
 
-  if kind == "checkbox" then
+  if kind == "checkbox" or kind == "layoutSpecific" then
     row.Button:SetEnabled(enabled)
   elseif kind == "dropdown" or kind == "actions" then
     row.Dropdown:SetEnabled(enabled)
@@ -1463,7 +1698,7 @@ local movementKeys = { UP = true, DOWN = true, LEFT = true, RIGHT = true }
 
 local function NudgeSelection(key)
   local info = lib.selected
-  if not info or not IsManaged(info) then
+  if not info then
     return false
   end
 
@@ -1508,9 +1743,32 @@ end
 local dialogWidth = 400
 local dialogTop, dialogBottom = 48, 20
 -- The dialog grows with its rows up to this share of the screen's height and
--- scrolls the rest, its scroll bar in the room kept free right of the rows.
+-- scrolls the rest, its scroll bar in the room kept free right of the rows. Rows
+-- that would only overrun it by up to the slack share are shown whole instead,
+-- since scrolling for the last few pixels is no help to anyone.
 local dialogMaxShare = 0.9
+local dialogSlackShare = 0.05
+-- Where the rows fit, the room under them is taller than they are by this many
+-- screen pixels. Exactly as tall, the edges snapped to whole screen pixels can
+-- leave it a pixel or two short, which the scroll bar takes for something to
+-- scroll. In pixels rather than units, because how many units a pixel is depends
+-- on the resolution and the UI scale.
+local dialogFitPixels = 3
 local dialogScrollBarRoom = 33
+
+-- One screen pixel in the dialog's own units.
+local function DialogPixel(dialog)
+  local scale = dialog:GetEffectiveScale()
+  if not (PixelUtil and scale and scale > 0) then
+    return 1
+  end
+  return PixelUtil.GetPixelToUIUnitFactor() / scale
+end
+
+-- The tallest the dialog grows to show its rows whole, slack included.
+local function DialogFitLimit()
+  return floor(UIParent:GetHeight() * (dialogMaxShare + dialogSlackShare))
+end
 
 local function BuildDialog()
   if lib.dialog then
@@ -1535,11 +1793,43 @@ local function BuildDialog()
   -- still leaves edit mode, print screen still takes a screenshot and typing still
   -- reaches whatever wanted it. An edit box with focus takes the keys first, so
   -- the arrow keys still walk the cursor along the text being typed.
-  dialog:EnableKeyboard(true)
-  dialog:SetPropagateKeyboardInput(true)
+  --
+  -- In combat SetPropagateKeyboardInput is off limits to addons, so there every
+  -- key is passed on, the arrows included, and nudging waits for the fight to end.
+  -- That needs passing on to be what the dialog is doing when a fight starts: it
+  -- goes back to it as soon as an arrow key is let go, and once more as combat
+  -- begins, which is still before the lockdown. A dialog first built in combat
+  -- leaves the keyboard alone altogether until the fight is over, since it could
+  -- not say to pass the keys on.
+  local function TakeKeyboard()
+    dialog:EnableKeyboard(true)
+    dialog:SetPropagateKeyboardInput(true)
+    dialog:UnregisterEvent("PLAYER_REGEN_ENABLED")
+  end
+  if InCombatLockdown() then
+    dialog:RegisterEvent("PLAYER_REGEN_ENABLED")
+  else
+    TakeKeyboard()
+  end
   dialog:SetScript("OnKeyDown", function(self, key)
+    if InCombatLockdown() then
+      return
+    end
     local handled = movementKeys[key] and NudgeSelection(key) or false
     self:SetPropagateKeyboardInput(not handled)
+  end)
+  dialog:SetScript("OnKeyUp", function(self)
+    if not InCombatLockdown() then
+      self:SetPropagateKeyboardInput(true)
+    end
+  end)
+  dialog:RegisterEvent("PLAYER_REGEN_DISABLED")
+  dialog:SetScript("OnEvent", function(self, event)
+    if event == "PLAYER_REGEN_ENABLED" then
+      TakeKeyboard()
+    elseif not InCombatLockdown() then
+      self:SetPropagateKeyboardInput(true)
+    end
   end)
 
   dialog.Border = CreateFrame("Frame", nil, dialog, "DialogBorderTranslucentTemplate")
@@ -1564,6 +1854,23 @@ local function BuildDialog()
   dialog.libCanvas:SetWidth(dialogWidth)
   scroll:SetScrollChild(dialog.libCanvas)
   dialog.libScroll = scroll
+
+  -- The rows reach a little further down than the heights they are laid out by,
+  -- some control hanging a few units below its slot, and the scroll frame goes by
+  -- what is really there. So where the rows were meant to fit and something is
+  -- left to scroll all the same, the dialog grows by just that much, and keeps
+  -- it for every drawing after, so that the scroll bar does not flash up each time.
+  -- Unless that would take it past where it would scroll anyway.
+  scroll:HookScript("OnScrollRangeChanged", function(_, _, range)
+    if not dialog.libFits or not range or range <= 0 then
+      return
+    end
+    local height = dialog:GetHeight() + range
+    if height <= DialogFitLimit() then
+      dialog.libOverhang = (dialog.libOverhang or 0) + range
+      dialog:SetHeight(height)
+    end
+  end)
 
   dialog.rows = NewRowPools()
 
@@ -1592,6 +1899,9 @@ end
 
 -- Draws every row of a registration into a host, top to bottom.
 local function Populate(host, info, top, bottom)
+  -- Other rows may have other tooltips, so the widest is measured again.
+  host.libTooltipWidth = nil
+
   for _, pool in pairs(host.rows) do
     for index = 1, (pool.used or 0) do
       pool[index]:Hide()
@@ -1637,6 +1947,8 @@ local function Populate(host, info, top, bottom)
         SetupSlider(row, info, setting)
       elseif setting.type == "checkbox" then
         SetupCheckbox(row, info, setting)
+      elseif setting.type == "layoutSpecific" then
+        SetupLayoutSpecific(row, info, setting)
       elseif setting.type == "color" then
         SetupColor(row, info, setting)
       elseif setting.type == "text" then
@@ -1695,6 +2007,11 @@ local function Populate(host, info, top, bottom)
         -- Greyed when there is nothing to pick, rather than opening on nothing.
         SetRowEnabled(row, setting.type, (row.libActionCount or 0) > 0
           and not (setting.IsDisabled and setting.IsDisabled()))
+      elseif setting.type == "layoutSpecific" then
+        -- Greyed where no layout can be given the frame: an override layout, or
+        -- a preset outside edit mode.
+        SetRowEnabled(row, setting.type, lib:CanManage()
+          and not (setting.IsDisabled and setting.IsDisabled()))
       elseif setting.type ~= "separator" then
         SetRowEnabled(row, setting.type, not (setting.IsDisabled and setting.IsDisabled()))
       end
@@ -1717,7 +2034,13 @@ local function PopulateDialog(info)
     dialog.libScroll:SetVerticalScroll(0)
   end
   local height = dialog.libCanvas:GetHeight() + dialogTop + dialogBottom
-  dialog:SetHeight(min(height, floor(UIParent:GetHeight() * dialogMaxShare)))
+  dialog.libFits = height <= DialogFitLimit()
+  if dialog.libFits then
+    height = height + dialogFitPixels * DialogPixel(dialog) + (dialog.libOverhang or 0)
+  else
+    height = floor(UIParent:GetHeight() * dialogMaxShare)
+  end
+  dialog:SetHeight(height)
 end
 
 
@@ -1730,8 +2053,6 @@ function RefreshPanel()
   if not panel then
     return
   end
-
-  local writable = ActiveLayoutKey() ~= nil
 
   local index = 0
   for _, regKey in ipairs(order) do
@@ -1747,16 +2068,12 @@ function RefreshPanel()
 
     row:SetLabelText(info.displayName)
     row:SetCallback(function(isChecked)
-      lib:SetManaged(regKey, isChecked)
+      lib:SetShownInEditMode(regKey, isChecked)
     end)
 
     -- SetControlChecked would fire the callback again, so set the button directly.
-    row.Button:SetChecked(IsManaged(info))
+    row.Button:SetChecked(ShownInEditMode(info))
     row:Show()
-
-    -- After the show, because Blizzard's OnShow re-enables the button.
-    row.Button:SetEnabled(writable)
-    SetLabelEnabled(row.Label, writable)
   end
 
   for i = index + 1, #panel.rows do
@@ -1799,7 +2116,7 @@ end
 
 function RefreshOverlays()
   -- Done inline rather than through ClearSelection, which would recurse back here.
-  if lib.selected and (not lib.editModeActive or not IsManaged(lib.selected)) then
+  if lib.selected and (not lib.editModeActive or not ShownInEditMode(lib.selected)) then
     lib.selected = nil
     if lib.dialog then
       lib.dialog:Hide()
@@ -1808,9 +2125,9 @@ function RefreshOverlays()
 
   for _, regKey in ipairs(order) do
     local info = registrations[regKey]
-    local managed = lib.editModeActive and IsManaged(info)
+    local shown = lib.editModeActive and ShownInEditMode(info)
 
-    if managed then
+    if shown then
       -- The preview has to come first, because the frame may only be created
       -- when the addon is asked to show it.
       if info.OnPreview and not info.previewing then
@@ -1834,7 +2151,7 @@ function RefreshOverlays()
       SetOverlayBehind(info, info.overlay, false)
     end
 
-    if not managed and info.OnPreview and info.previewing then
+    if not shown and info.OnPreview and info.previewing then
       info.previewing = false
       info.OnPreview(false)
     end
@@ -1890,15 +2207,35 @@ local function AnnounceSelection()
   announcing = true
   -- Blizzard's own settings dialog must not stay attached to a system while ours
   -- is up, because Blizzard's own setting row templates, which this dialog reuses,
-  -- report into whichever dialog is listening.
-  EditModeManagerFrame:ClearSelectedSystem()
+  -- report into whichever dialog is listening. Out of combat Blizzard hands an
+  -- addon's call to a secure delegate. In combat it runs it as the addon, and the
+  -- systems it highlights again include action bars, which an addon may not touch
+  -- then. So in combat it is not called at all, which SelectFrame makes safe.
+  if not InCombatLockdown() then
+    EditModeManagerFrame:ClearSelectedSystem()
+  end
   EventRegistry:TriggerEvent("EditModeExternal.hideDialog")
   announcing = false
 end
 
+-- Whether one of Blizzard's systems is selected, which is exactly while its
+-- settings dialog is attached to one.
+local function BlizzardSystemSelected()
+  local blizzardDialog = EditModeSystemSettingsDialog
+  return blizzardDialog ~= nil and blizzardDialog.attachedToSystem ~= nil
+end
+
 function lib:SelectFrame(regKey)
   local info = registrations[regKey]
-  if not info or not lib.editModeActive or not IsManaged(info) then
+  -- Not under an override layout, which has no session to hold an edit.
+  if not info or not lib.sessionKey or not ShownInEditMode(info) then
+    return
+  end
+
+  -- Nor in combat while one of Blizzard's systems is selected, which could not be
+  -- cleared without touching protected frames (see AnnounceSelection). Left
+  -- attached, Blizzard's dialog would take the changes made in ours.
+  if InCombatLockdown() and BlizzardSystemSelected() then
     return
   end
 
@@ -1923,24 +2260,8 @@ end
 
 
 --------------------------------------------------------------------------------
--- Enabling and disabling a frame for the active layout
+-- Giving a frame to the active layout and taking it away
 --------------------------------------------------------------------------------
-
--- Returns a copy of the session's entry with only its ownership changed. An entry
--- that does not exist yet starts out with the look the frame has just been given.
-local function WithOwnership(entry, look, managed)
-  if entry then
-    entry = CopyTable(entry)
-    entry.inactive = not managed or nil
-    return entry
-  end
-  if managed and look then
-    entry = CopyTable(look)
-    entry.inactive = nil
-    return entry
-  end
-  return nil
-end
 
 function lib:SetManaged(regKey, managed)
   local info = registrations[regKey]
@@ -1951,65 +2272,92 @@ function lib:SetManaged(regKey, managed)
   -- Refused on a preset outside edit mode, where there would be no session to
   -- carry the change into a new layout and the preset itself is never written.
   if not lib:CanManage() then
-    RefreshPanel()
+    RefreshPages()
+    RefreshDialog()
     return
   end
 
-  local key = ActiveLayoutKey()
+  managed = managed and true or false
+  if managed == IsManaged(info) then
+    return
+  end
 
-  local entry = CurrentEntry(info)
-
-  if managed then
-    if entry then
-      -- A look this layout had parked. Put it back on, rather than capturing
-      -- whatever the frame happens to be wearing in the meantime.
-      entry.inactive = nil
-      ApplyEntry(info, entry)
-    else
-      entry = CaptureEntry(info)
-      if lib.sessionKey then
-        info.pending = entry
+  if lib.sessionKey then
+    -- In edit mode this is a change like any other, held back until Save, and
+    -- reverting or leaving without saving undoes it.
+    if managed then
+      if info.pending then
+        -- A look this layout had parked. Put it back on, rather than capturing
+        -- whatever the frame happens to be wearing in the meantime.
+        info.pending.inactive = nil
+        ApplyEntry(info, info.pending)
       else
-        info.storage[key] = entry
+        -- The layout starts out with what the frame is wearing, edits to the
+        -- addon's own settings included. Those were made for the frame as it is
+        -- now, which is this layout's from here on, so they are this layout's
+        -- now and no longer changes to the addon's own settings. What was moved
+        -- is noted, for taking the frame away again before anything changed.
+        info.pending = CaptureEntry(info)
+        info.given = {
+          look = CopyTable(info.pending),
+          ownPending = info.ownPending and CopyTable(info.ownPending) or nil,
+        }
+        if info.ownBaseline then
+          info.ownPending = CopyTable(info.ownBaseline)
+        end
       end
+    else
+      local given = info.given
+      info.given = nil
+      if given and SameValue(info.pending, given.look) then
+        -- Given the frame in this session and nothing changed since, so taking
+        -- it away again is as if neither had happened.
+        info.pending = nil
+        info.ownPending = given.ownPending
+      else
+        -- Kept rather than dropped, so that taking the frame back brings this
+        -- layout's look back.
+        info.pending.inactive = true
+      end
+      ShowOwnLook(info)
     end
+    UpdateDirty()
   else
-    -- Kept rather than deleted, so that ticking the box again brings this
-    -- layout's own look back.
-    if entry then
+    -- Outside edit mode, from the addon's own settings, it takes effect at once.
+    local key = ActiveLayoutKey()
+    local entry = info.storage[key]
+    if managed then
+      if entry then
+        entry.inactive = nil
+        ApplyEntry(info, entry)
+      else
+        info.storage[key] = CaptureEntry(info)
+      end
+    else
       entry.inactive = true
-    end
-    if lib.selected == info then
-      lib:ClearSelection()
-    end
-    if info.RestoreOwnSettings then
       info.RestoreOwnSettings()
     end
   end
 
-  -- Ticking and unticking take effect at once, the way Blizzard's own checkboxes
-  -- on this panel do, so they are not a change: Save does not light up for them
-  -- and reverting leaves them alone. The session carries the new ownership into
-  -- everything it measures against, while the look in each stays what it was, so
-  -- edits made to the look are still the changes they were.
-  if lib.sessionKey then
-    info.baseline = WithOwnership(info.baseline, info.pending, managed)
-    info.revertPoint = WithOwnership(info.revertPoint, info.pending, managed)
-    if managed then
-      -- What reverting puts on the frame now that the layout owns it.
-      info.live = CopyTable(info.baseline)
-    end
-    -- A preset is never written, so there a tick lasts only as long as the session.
-    if not IsPresetKey(key) then
-      info.storage[key] = WithOwnership(info.storage[key], info.pending, managed)
-    end
-  end
+  -- The frame is wearing a different look now, the layout's or its own.
+  RefreshDialog()
+  RefreshPages()
+end
 
-  RefreshButtonStates()
+--- Shows or hides the frame in edit mode, as the panel's checkbox does.
+function lib:SetShownInEditMode(regKey, shown)
+  local info = registrations[regKey]
+  if not info then
+    return
+  end
+  shown = shown and true or false
+  if info.SetShownInEditMode then
+    info.SetShownInEditMode(shown)
+  else
+    info.shownInEditMode = shown
+  end
   RefreshPanel()
   RefreshOverlays()
-  -- The frame is wearing a different look now, the layout's or its own.
-  RefreshPages()
 end
 
 
@@ -2034,6 +2382,116 @@ end
 
 
 --------------------------------------------------------------------------------
+-- Saving on a preset
+--------------------------------------------------------------------------------
+-- On a preset layout Blizzard's Save always asks for a new layout, because the
+-- preset itself is never written. Changes to the addon's own settings belong to
+-- no layout, though, so when they are all there is to save, making a layout for
+-- them would be absurd. Blizzard's buttons cannot be told otherwise: they were
+-- handed their handlers as closures when Blizzard_EditMode loaded, and replacing
+-- those would taint edit mode. So while that is the case, a button of our own
+-- lies over Save, and another over Save and Exit in the dialog Blizzard shows on
+-- leaving or switching layouts with unsaved changes. Plain buttons, so that they
+-- can be shown and hidden in combat as well.
+
+-- Whether any of Blizzard's own systems has an unsaved change, asked the way
+-- CheckForSystemActiveChanges asks.
+local function BlizzardHasChanges()
+  for _, systemFrame in ipairs(EditModeManagerFrame.registeredSystemFrames or {}) do
+    if systemFrame:HasActiveChanges() then
+      return true
+    end
+  end
+  return false
+end
+
+-- True on a preset while the addon's own settings are the only thing changed.
+local function OnlyOwnChanges()
+  if not lib.editModeActive or not IsPresetKey(lib.sessionKey) then
+    return false
+  end
+  local own = false
+  for _, regKey in ipairs(order) do
+    local info = registrations[regKey]
+    if not SameValue(info.pending, info.baseline) then
+      return false
+    end
+    if not SameValue(info.ownPending, info.ownBaseline) then
+      own = true
+    end
+  end
+  return own and not BlizzardHasChanges()
+end
+
+local function SaveOwnSettingsOnly()
+  for _, regKey in ipairs(order) do
+    CommitOwnSettings(registrations[regKey])
+  end
+  UpdateDirty()
+end
+
+-- A button lying exactly over one of Blizzard's, which looks to the player like
+-- that button still: it lights and goes down on it.
+local function CoverButton(button, OnClick)
+  local cover = CreateFrame("Button", nil, button)
+  cover:SetAllPoints()
+  cover:SetFrameLevel(button:GetFrameLevel() + 5)
+  cover:SetScript("OnEnter", function() button:LockHighlight() end)
+  cover:SetScript("OnLeave", function() button:UnlockHighlight() end)
+  cover:SetScript("OnMouseDown", function() button:SetButtonState("PUSHED") end)
+  cover:SetScript("OnMouseUp", function() button:SetButtonState("NORMAL") end)
+  cover:SetScript("OnHide", function() button:UnlockHighlight() end)
+  cover:SetScript("OnClick", function()
+    PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
+    OnClick()
+  end)
+  cover:Hide()
+  return cover
+end
+
+function BuildSaveCovers()  -- forward declared as a local above
+  if lib.saveCover then
+    return
+  end
+
+  -- Built once and kept across library upgrades, so they act through the
+  -- handlers, as the hooks do.
+  local handlers = lib.handlers
+
+  local save = EditModeManagerFrame.SaveChangesButton
+  if save then
+    lib.saveCover = CoverButton(save, function() handlers.SaveOwnSettingsOnly() end)
+  end
+
+  -- Save and Exit, or Save and Switch. Saving leaves nothing to save, so what is
+  -- left is the dialog's other button, Exit or Switch, which Blizzard's own Save
+  -- presses too once it has saved. Except in combat, where leaving edit mode from
+  -- an addon's code could be blocked: there it saves, and the dialog stays for the
+  -- player to leave.
+  local unsaved = EditModeUnsavedChangesDialog
+  if unsaved and unsaved.SaveAndProceedButton and unsaved.ProceedButton then
+    lib.saveExitCover = CoverButton(unsaved.SaveAndProceedButton, function()
+      handlers.SaveOwnSettingsOnly()
+      if not InCombatLockdown() then
+        unsaved.ProceedButton:Click()
+      end
+    end)
+    unsaved:HookScript("OnShow", function() handlers.RefreshSaveCovers() end)
+  end
+end
+
+function RefreshSaveCovers()  -- forward declared as a local above
+  local ownOnly = OnlyOwnChanges()
+  if lib.saveCover then
+    lib.saveCover:SetShown(ownOnly)
+  end
+  if lib.saveExitCover then
+    lib.saveExitCover:SetShown(ownOnly)
+  end
+end
+
+
+--------------------------------------------------------------------------------
 -- Hooks into the edit mode manager
 --------------------------------------------------------------------------------
 
@@ -2042,30 +2500,36 @@ end
 -- the addon's own settings, and applying them would leave the frame looking as
 -- though a layout had chosen every one of them.
 local function RestoreLook(info, baseline, live)
-  if not IsActiveEntry(baseline) and info.RestoreOwnSettings then
+  if not IsActiveEntry(baseline) then
     info.RestoreOwnSettings()
   else
     ApplyEntry(info, live)
   end
 end
 
+-- Drops every change the session holds for one frame, the addon's own settings
+-- included, which RestoreLook hands back untouched.
+local function DropChanges(info, baseline, live)
+  info.pending = baseline and CopyTable(baseline) or nil
+  info.ownPending = info.ownBaseline and CopyTable(info.ownBaseline) or nil
+  info.given = nil
+  RestoreLook(info, baseline, live)
+end
+
 local function RevertSession()
   for _, regKey in ipairs(order) do
     local info = registrations[regKey]
-    info.pending = info.baseline and CopyTable(info.baseline) or nil
-    info.revertPoint = info.baseline and CopyTable(info.baseline) or nil
-    RestoreLook(info, info.baseline, info.live)
+    DropChanges(info, info.baseline, info.live)
   end
-  lib.dirty = false
-  RefreshPanel()
-  RefreshOverlays()
+  ClearDirty()
   RefreshDialog()
 end
 
--- Blizzard reverts on every exit, on the revert button, and as the very first step
--- of creating a new layout. Which of those it is only becomes clear afterwards, so
--- the session is copied aside here and the actual revert waits one frame. Creating
--- a layout cancels that wait and claims the copy instead.
+-- Blizzard reverts on every exit, on the revert button, as the very first step of
+-- creating a new layout, and whenever it applies the active layout again. Which
+-- of those it is only becomes clear afterwards, so the session is copied aside
+-- here and the actual revert waits one frame. Creating a layout cancels that wait
+-- and claims the copy instead.
 local function ScheduleRevert()
   if not lib.sessionKey or revertScheduled then
     return
@@ -2080,6 +2544,8 @@ local function ScheduleRevert()
       pending = info.pending and CopyTable(info.pending) or nil,
       baseline = info.baseline and CopyTable(info.baseline) or nil,
       live = info.live and CopyTable(info.live) or nil,
+      ownBaseline = info.ownBaseline and CopyTable(info.ownBaseline) or nil,
+      ownPending = info.ownPending and CopyTable(info.ownPending) or nil,
     }
   end
   revertSnapshot = snapshot
@@ -2104,15 +2570,11 @@ function ConsumeRevert()  -- forward declared as a local above
   for regKey, entry in pairs(snapshot.entries) do
     local info = registrations[regKey]
     if info then
-      info.pending = entry.baseline and CopyTable(entry.baseline) or nil
-      info.revertPoint = entry.baseline and CopyTable(entry.baseline) or nil
-      RestoreLook(info, entry.baseline, entry.live)
+      DropChanges(info, entry.baseline, entry.live)
     end
   end
 
-  lib.dirty = false
-  RefreshPanel()
-  RefreshOverlays()
+  ClearDirty()
   RefreshDialog()
 end
 
@@ -2121,35 +2583,40 @@ local function OnLayoutsUpdated()
 
   local key = ActiveLayoutKey()
 
-  -- Switching layouts mid session drops unsaved changes, exactly as it does for
-  -- Blizzard's own systems. Not while a revert is pending though, because that is
-  -- a layout being created out of the one that is active, and those edits are
-  -- owed to the new layout.
-  if lib.sessionKey and key ~= lib.sessionKey and not revertScheduled then
-    RevertSession()
+  -- Blizzard applies its saved layouts here and clears its own unsaved changes
+  -- with them, whether the layout switched or the same one was applied again, so
+  -- this session's unsaved changes go too, exactly as Blizzard's own do. Switching
+  -- drops them at once. The same layout applied again may be Blizzard's revert,
+  -- which runs through here before the RevertAllChanges hook can say so, and
+  -- which may be the first step of creating a layout the edits are owed to. So
+  -- that goes through ScheduleRevert, which lets a new layout claim them. A spec
+  -- change, say, just drops them a frame later.
+  if lib.sessionKey then
+    if key ~= lib.sessionKey and not revertScheduled then
+      RevertSession()
+    elseif key == lib.sessionKey then
+      ScheduleRevert()
+    end
   end
 
   ApplyLayout()
-  RefreshPages()
 
-  -- A plain revert also lands here with the key unchanged, and must not throw the
-  -- pending edits away before ConsumeRevert has had its say.
   if lib.editModeActive and key ~= lib.sessionKey then
     BeginSession(key)
   end
-
-  RefreshPanel()
-  RefreshOverlays()
+  RefreshPages()
   RefreshDialog()
 end
 
 local function OnEditModeEnter()
   BuildPanel()
+  BuildSaveCovers()
   lib.editModeActive = true
   lib.dirty = false
   BeginSession(ActiveLayoutKey())
   RefreshPanel()
   RefreshOverlays()
+  RefreshSaveCovers()
 end
 
 local function OnEditModeExit()
@@ -2160,16 +2627,15 @@ local function OnEditModeExit()
     ConsumeRevert()
   end
 
-  local key = lib.sessionKey
   lib.editModeActive = false
   lib:ClearSelection()
   RefreshOverlays()
   EndSession()
-  -- A tick on a preset lasts only as long as the session, so the frame is handed
-  -- back to what the preset really holds, which is nothing.
-  if IsPresetKey(key) then
-    ApplyLayout()
-  end
+  -- Outside edit mode the frame wears exactly what the active layout has stored,
+  -- or the addon's own settings, with nothing of the session left pinned on it.
+  -- Nothing is ever stored for a preset, so there that is the addon's own.
+  ApplyLayout()
+  RefreshSaveCovers()
   if lib.panel then
     lib.panel:Hide()
   end
@@ -2196,16 +2662,19 @@ local function OnNewLayout(_, newLayoutInfo, layoutType, layoutName, isLayoutImp
   for regKey, entry in pairs(snapshot.entries) do
     local info = registrations[regKey]
     if info then
-      -- The baseline carries any tick from this session, which on a preset is
-      -- never stored.
+      -- The layout being left keeps what it had saved, and a preset never has
+      -- anything stored.
       if oldKey and not IsPresetKey(oldKey) then
         info.storage[oldKey] = entry.baseline and CopyTable(entry.baseline) or nil
       end
       -- An imported layout was built from someone else's string, which carries
       -- nothing of ours, so it starts out owning nothing. Only a layout the
       -- player made out of the one they were editing inherits those edits.
+      -- Edits to the addon's own settings belong to no layout, and were saved
+      -- along with the rest, so they go to the addon.
       if not isLayoutImported then
         info.storage[newKey] = entry.pending and CopyTable(entry.pending) or nil
+        WriteOwnSettings(info, entry.ownBaseline, entry.ownPending)
       end
     end
   end
@@ -2218,9 +2687,7 @@ local function OnNewLayout(_, newLayoutInfo, layoutType, layoutName, isLayoutImp
   end
 
   BeginSession(newKey)
-  lib.dirty = false
-  RefreshPanel()
-  RefreshOverlays()
+  ClearDirty()
   RefreshDialog()
 end
 
@@ -2257,6 +2724,9 @@ local function OnCheckActiveChanges(manager)
   if lib.dirty then
     manager:SetHasActiveChanges(true)
   end
+  -- Blizzard's own systems may just have gained or lost a change, which decides
+  -- whether Save on a preset needs a new layout.
+  RefreshSaveCovers()
 end
 
 -- Hooks can only be installed once per session, while a newer copy of the library
@@ -2273,6 +2743,8 @@ lib.handlers.OnNewLayout = function(...) return OnNewLayout(...) end
 lib.handlers.OnRenameLayout = function(...) return OnRenameLayout(...) end
 lib.handlers.OnDeleteLayout = function(...) return OnDeleteLayout(...) end
 lib.handlers.OnCheckActiveChanges = function(...) return OnCheckActiveChanges(...) end
+lib.handlers.SaveOwnSettingsOnly = function(...) return SaveOwnSettingsOnly(...) end
+lib.handlers.RefreshSaveCovers = function(...) return RefreshSaveCovers(...) end
 -- Something else on the edit mode screen took a selection. Ignored while this
 -- library is the one saying so, or selecting one of our own frames would clear
 -- the selection it is in the middle of making.
@@ -2430,7 +2902,7 @@ end
 
 --- Registers a frame for layout aware placement and settings.
 -- @param regKey  unique string identifying this registration
--- @param info    table as described at the top of this file
+-- @param info    table as described in README.md
 function lib:RegisterFrame(regKey, info)
   assert(type(regKey) == "string", MAJOR .. ": regKey has to be a string.")
   assert(type(info) == "table", MAJOR .. ": info has to be a table.")
@@ -2439,11 +2911,16 @@ function lib:RegisterFrame(regKey, info)
   assert(type(info.storage) == "table", MAJOR .. ": info.storage has to be a table.")
   assert(type(info.GetPosition) == "function", MAJOR .. ": info.GetPosition is required.")
   assert(type(info.SetPosition) == "function", MAJOR .. ": info.SetPosition is required.")
+  -- Edit mode edits the addon's own settings too, while no layout owns the frame,
+  -- and hands them over through these on Save.
+  assert(type(info.EditPosition) == "function", MAJOR .. ": info.EditPosition is required.")
+  assert(type(info.RestoreOwnSettings) == "function", MAJOR .. ": info.RestoreOwnSettings is required.")
 
   info.settings = info.settings or {}
   if #info.settings > 0 then
     assert(type(info.GetSetting) == "function", MAJOR .. ": info.GetSetting is required for settings.")
     assert(type(info.SetSetting) == "function", MAJOR .. ": info.SetSetting is required for settings.")
+    assert(type(info.EditSetting) == "function", MAJOR .. ": info.EditSetting is required for settings.")
   end
 
   -- Checked here rather than left to the dialog, which draws what it recognises
@@ -2455,7 +2932,7 @@ function lib:RegisterFrame(regKey, info)
 
     if setting.type == "actions" then
       assert(setting.actions, where .. "is an action row and so needs actions.")
-    elseif not rowIsButton[setting.type] and setting.type ~= "separator" then
+    elseif not rowHasNoKey[setting.type] then
       assert(setting.key, where .. "carries a value and so needs a key.")
     end
 
@@ -2489,9 +2966,11 @@ function lib:RegisterFrame(regKey, info)
   RefreshLayoutIndex()
 
   -- The layout may already have been applied before this addon finished loading.
+  -- Only a look in use, not one the layout has parked.
   local key = ActiveLayoutKey()
-  if key then
-    ApplyEntry(info, info.storage[key])
+  local stored = key and info.storage[key]
+  if IsActiveEntry(stored) then
+    ApplyEntry(info, stored)
   end
 
   if lib.editModeActive then
@@ -2558,12 +3037,14 @@ function lib:Refresh(regKey)
   end
 end
 
---- Folds the frame's current position and settings into the active layout.
+--- Folds the frame's current position and settings into what it is wearing.
 -- Call this when the addon's own settings changed something, so that a layout
 -- owning the frame takes the change on board instead of putting its own value
--- back the next time it is applied. A layout that does not own the frame is left
--- alone, so a player who never opted in is unaffected. A settings page showing
--- the frame is redrawn either way.
+-- back the next time it is applied. Outside edit mode a layout that does not own
+-- the frame is left alone, so a player who never opted in is unaffected. In edit
+-- mode the change is held back for Save either way, for the layout or for the
+-- addon's own settings (see lib:IsEditing). A settings page showing the frame is
+-- redrawn either way.
 function lib:Capture(regKey)
   local info = registrations[regKey]
   if not info then
@@ -2572,8 +3053,8 @@ function lib:Capture(regKey)
 
   -- A layout that is not using the frame keeps its look parked, and a change made
   -- elsewhere is no reason to disturb it.
-  local entry = CurrentEntry(info)
-  if IsActiveEntry(entry) then
+  local entry = EditTarget(info)
+  if entry then
     local fresh = CaptureEntry(info)
     local changed = false
 
@@ -2588,7 +3069,7 @@ function lib:Capture(regKey)
 
     if changed and lib.sessionKey then
       -- Changed from under an open edit mode, so it is a change to be saved.
-      MarkDirty()
+      UpdateDirty()
       RefreshDialog()
     end
   end
@@ -2598,21 +3079,22 @@ function lib:Capture(regKey)
 end
 
 --- Puts one frame back the way this edit mode session found it, the way
--- Blizzard's own Revert Changes button does for one of its systems. Everything
--- else on screen is left alone.
+-- Blizzard's own Revert Changes button does for one of its systems: its look,
+-- whether the layout owns it, and the addon's own settings. Everything else on
+-- screen is left alone.
 function lib:RevertFrame(regKey)
   local info = registrations[regKey]
   if not info or not lib.sessionKey then
     return
   end
 
-  info.pending = info.revertPoint and CopyTable(info.revertPoint) or nil
+  info.pending = info.baseline and CopyTable(info.baseline) or nil
+  info.ownPending = info.ownBaseline and CopyTable(info.ownBaseline) or nil
+  info.given = nil
   ApplyOrRestore(info, info.pending)
 
-  RefreshPanel()
-  RefreshOverlays()
+  UpdateDirty()
   RefreshDialog()
-  RefreshButtonStates()
 end
 
 --- Returns true while this edit mode session has changed the frame.
@@ -2645,11 +3127,11 @@ function lib:GetStoredLayouts(regKey)
   return found
 end
 
---- Puts another layout's stored look onto this frame, as a change to the layout
--- that owns it now. The copy is a change like any other: the save button lights
--- up and reverting undoes it. The source is left alone. Outside edit mode, from a
--- settings page, it goes through EditSetting and EditPosition instead, onto
--- whatever the frame is wearing.
+--- Puts another layout's stored look onto this frame, as a change to whatever
+-- the frame is wearing: the layout owning it, or the addon's own settings. The
+-- copy is a change like any other: the save button lights up and reverting undoes
+-- it. The source is left alone. Outside edit mode, from a settings page, it goes
+-- through EditSetting and EditPosition instead.
 function lib:CopyFrom(regKey, sourceKey)
   local info = registrations[regKey]
   if not info or not sourceKey then
@@ -2663,13 +3145,13 @@ function lib:CopyFrom(regKey, sourceKey)
 
   -- From a settings page, outside edit mode: onto whatever the frame is wearing,
   -- the way the addon's own settings change it.
-  if not lib.sessionKey and info.EditSetting then
+  if not lib.sessionKey then
     EditThroughAddon(info, function() EditEntry(info, source) end)
     return
   end
 
-  local entry = CurrentEntry(info)
-  if not IsActiveEntry(entry) then
+  local entry = EditTarget(info)
+  if not entry then
     return
   end
 
@@ -2683,7 +3165,7 @@ function lib:CopyFrom(regKey, sourceKey)
   end
 
   ApplyEntry(info, entry)
-  MarkDirty()
+  UpdateDirty()
   RefreshDialog()
 end
 
@@ -2703,8 +3185,6 @@ end
 function lib:CreateSettingsFrame(regKey, parent, opener)
   local info = registrations[regKey]
   assert(info, MAJOR .. ": " .. tostring(regKey) .. " is not registered.")
-  assert(type(info.EditSetting) == "function" and type(info.EditPosition) == "function",
-    MAJOR .. ": a settings frame needs EditSetting and EditPosition in the registration.")
   if not IsSupported() then
     return nil
   end
@@ -2738,9 +3218,28 @@ function lib:CreateSettingsFrame(regKey, parent, opener)
 end
 
 --- Returns true while the frame's position and settings are owned by the layout.
+-- In edit mode that is what the session holds, saved or not. False while the
+-- library hands the addon its own settings on Save, so that they land there.
 function lib:IsManaged(regKey)
   local info = registrations[regKey]
-  return info ~= nil and IsManaged(info)
+  return info ~= nil and not lib.writingOwn and IsManaged(info)
+end
+
+--- Returns true while edit mode is open and holding changes back until Save. A
+-- change the addon makes to the frame meanwhile, from its own settings UI or a
+-- button row, belongs to the session too: put it on the frame the way SetSetting
+-- does and call Capture, and the library keeps it for whatever the frame is
+-- wearing, the layout or the addon's own settings, until the player saves or
+-- reverts. False while the library hands the addon its own settings on Save.
+function lib:IsEditing()
+  return lib.sessionKey ~= nil and not lib.writingOwn
+end
+
+--- Returns true while the frame shows in edit mode, which the panel's checkbox
+-- decides.
+function lib:IsShownInEditMode(regKey)
+  local info = registrations[regKey]
+  return info ~= nil and ShownInEditMode(info)
 end
 
 InstallHooks()

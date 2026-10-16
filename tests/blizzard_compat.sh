@@ -15,9 +15,10 @@
 #
 #   - every hooked or called EditModeManagerFrame method must exist,
 #   - every template, mixin, font object and edit mode event it names must
-#     exist, and every child of the manager it reaches for, a button say. A name
-#     it only uses after looking it up in _G is one it can do without, and is
-#     left out,
+#     exist, and every child or field of the manager it reaches for, a button
+#     say, and every edit mode dialog with the children it reaches for. A name it
+#     only uses after looking it up in _G is one it can do without, and is left
+#     out,
 #   - and the bodies of those methods, plus the few whose order the library relies
 #     on without hooking them, are compared with the base. A difference is not
 #     necessarily a break, so it is reported for a person to read.
@@ -51,13 +52,23 @@ fonts=$(printf '%s\n' "$src" | grep -oE '"(GameFont|ChatFont|SystemFont)[A-Za-z0
 # Fields read off the manager that are not its methods: child frames.
 children=$(printf '%s\n' "$src" | grep -oE 'EditModeManagerFrame\.[A-Z][A-Za-z]+' | sed 's/.*\.//' | sort -u \
            | grep -vxF -f <(printf '%s\n' $methods))
+# And its plain fields, which the manager sets on itself.
+fields=$(printf '%s\n' "$src" | grep -oE 'EditModeManagerFrame\.[a-z][A-Za-z]+' | sed 's/.*\.//' | sort -u)
+# Edit mode's named dialogs, and the children of the unsaved changes dialog, which
+# the library reaches through a local called unsaved.
+dialogs=$(printf '%s\n' "$src" | grep -oE '\bEditMode[A-Za-z]*Dialog\b' | sort -u)
+unsavedChildren=$(printf '%s\n' "$src" | grep -oE '\bunsaved\.[A-Z][A-Za-z]+' | sed 's/.*\.//' | sort -u)
+# Fields read off Blizzard's settings dialog, through a local called blizzardDialog.
+# Missing one reads as nil, so its loss would go unnoticed in the game.
+dialogFields=$(printf '%s\n' "$src" | grep -oE '\bblizzardDialog\.[a-z][A-Za-z]+' | sed 's/.*\.//' | sort -u)
 
 # Not hooked, but the library relies on what they do and in which order: saving
 # fires EditMode.SavedLayouts, entering and leaving fire Enter and Exit, and
 # switching layouts clears the selection. OnLoad, because it hands the Revert All
 # Changes button a closure over RevertAllChanges, which is why the library hooks
-# the button as well as the method.
-relied_on="SaveLayouts SelectLayout EnterEditMode ExitEditMode OnLoad"
+# the button as well as the method. SaveLayoutChanges, because on a preset it asks
+# for a new layout whatever changed, which is why Save gets covered there.
+relied_on="SaveLayouts SaveLayoutChanges SelectLayout EnterEditMode ExitEditMode OnLoad"
 compared=$(printf '%s\n' $methods $relied_on | sort -u)
 
 body() {   # ref, method: the method's body with whitespace collapsed
@@ -68,8 +79,10 @@ body() {   # ref, method: the method's body with whitespace collapsed
 
 status=0
 echo "LibLayoutSettings uses $(echo $methods | wc -w) manager methods, $(echo $templates | wc -w) templates," \
-     "$(echo $mixins | wc -w) mixins and helpers, $(echo $fonts | wc -w) font objects, $(echo $events | wc -w) events" \
-     "and $(echo $children | wc -w) of its children."
+     "$(echo $mixins | wc -w) mixins and helpers, $(echo $fonts | wc -w) font objects, $(echo $events | wc -w) events," \
+     "$(echo $children | wc -w) of the manager's children and $(echo $fields | wc -w) of its fields," \
+     "$(echo $dialogs | wc -w) dialogs, $(echo $unsavedChildren | wc -w) children of the unsaved changes dialog" \
+     "and $(echo $dialogFields | wc -w) field of the settings dialog."
 echo "Base: $base  ($(git -C "$repo" log -1 --format=%s "$base" 2>/dev/null))"
 echo
 
@@ -95,8 +108,14 @@ for ref in "${refs[@]}"; do
   for e in $events; do
     git -C "$repo" grep -qF "\"$e\"" "$ref" -- 'Interface/*.lua' || missing+=("$e")
   done
-  for c in $children; do
+  for c in $children $unsavedChildren; do
     git -C "$repo" grep -qF "parentKey=\"$c\"" "$ref" -- 'Interface/AddOns/Blizzard_EditMode/*.xml' || missing+=("$c")
+  done
+  for f in $fields $dialogFields; do
+    git -C "$repo" grep -qE "self\.$f = " "$ref" -- 'Interface/AddOns/Blizzard_EditMode/*.lua' || missing+=("$f")
+  done
+  for d in $dialogs; do
+    git -C "$repo" grep -qF "name=\"$d\"" "$ref" -- 'Interface/AddOns/Blizzard_EditMode/*.xml' || missing+=("$d")
   done
 
   if [ ${#missing[@]} -eq 0 ]; then

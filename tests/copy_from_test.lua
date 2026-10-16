@@ -1,7 +1,8 @@
 -- Copying one layout's look onto another: which layouts are offered as a source,
 -- what a copy brings across and what it leaves alone, that it reverts like any
--- other change, the action row that offers it, and a malformed action row being
--- refused at registration.
+-- other change, copying onto the addon's own settings, the action row that offers
+-- it, and a malformed action row being refused at registration. Also the dialog
+-- the action row is in: opened first in combat, and how tall it grows.
 
 local here = debug.getinfo(1, "S").source:sub(2):match("^(.*)[/\\]") or "."
 dofile(here .. "/stubs.lua")
@@ -29,7 +30,8 @@ function EditModeManagerFrame:GetActiveLayoutInfo()
 end
 function EditModeManagerFrame:SetHasActiveChanges(v) self.hasActiveChanges = v and true or false end
 function EditModeManagerFrame:CheckForSystemActiveChanges() self:SetHasActiveChanges(false) end
-function EditModeManagerFrame:UpdateLayoutInfo() end
+-- Applies the saved layouts, which clears every unsaved change.
+function EditModeManagerFrame:UpdateLayoutInfo() self:SetHasActiveChanges(false) end
 function EditModeManagerFrame:RevertAllChanges() self:UpdateLayoutInfo() end
 function EditModeManagerFrame:SelectSystem() end
 function EditModeManagerFrame:ClearSelectedSystem() end
@@ -75,10 +77,18 @@ local storage = {
   },
 }
 
-local live = {
+-- The addon's own settings, and a layout's overrides on top of them, which is
+-- what the bar wears.
+local own = {
   p = "BOTTOM", rp = "TOP", x = 0, y = -170,
   width = 300, spark = true, barcolor = { r = 1, g = 0, b = 0 },
 }
+local over = {}
+local live = setmetatable({}, {
+  __index = function(_, k) local v = over[k]; if v == nil then v = own[k] end; return v end,
+  __newindex = function(_, k, v) over[k] = v end,
+})
+local function EditOwn(key, value) own[key] = value; over[key] = nil end
 
 local copied = {}
 
@@ -112,8 +122,11 @@ LLS:RegisterFrame("Bar", {
   },
   GetSetting = function(key) return live[key] end,
   SetSetting = function(key, value) live[key] = value end,
+  EditSetting = EditOwn,
   GetPosition = function() return live.p, live.rp, live.x, live.y end,
   SetPosition = function(p, rp, x, y) live.p, live.rp, live.x, live.y = p, rp, x, y end,
+  EditPosition = function(p, rp, x, y) EditOwn("p", p); EditOwn("rp", rp); EditOwn("x", x); EditOwn("y", y) end,
+  RestoreOwnSettings = function() for key in pairs(over) do over[key] = nil end end,
   GetDefaultPosition = function() return "BOTTOM", "TOP", 0, -170 end,
 })
 
@@ -197,12 +210,15 @@ Check("reverting undoes the copy", live.width == 300)
 Check("and puts the position back", live.p == "BOTTOM" and live.y == -170)
 Check("with nothing left to revert", not LLS:HasChanges("Bar"))
 
-print("== copying onto a layout that owns nothing does nothing ==")
+print("== copying while no layout owns the bar goes to the own settings ==")
 LLS:SetManaged("Bar", false)
-live.width = 300
 LLS:CopyFrom("Bar", "1:Raiding")
-Check("the bar is left alone", live.width == 300)
-LLS:SetManaged("Bar", true)
+Check("the bar wears the copy", live.width == 555 and live.p == "TOP")
+Check("held back until Save", own.width == 300 and own.p == "BOTTOM" and LLS:HasChanges("Bar"))
+EditModeManagerFrame:RevertAllChanges()
+STUB.RunTimers()
+Check("reverting drops it, and Travel owns the bar again",
+  own.width == 300 and live.width == 300 and LLS:IsManaged("Bar"))
 
 print("== a source that does not exist is ignored ==")
 live.width = 300
@@ -210,6 +226,16 @@ LLS:CopyFrom("Bar", "1:NoSuchLayout")
 Check("nothing happens", live.width == 300)
 LLS:CopyFrom("Bar", nil)
 Check("and nil is survivable", live.width == 300)
+
+print("== a dialog first opened in combat ==")
+STUB.inCombat = true
+local opened = pcall(LLS.SelectFrame, LLS, "Bar")
+STUB.inCombat = false
+Check("opens without an error", opened and LLS.dialog and LLS.dialog:IsShown())
+Check("and leaves the keyboard alone", STUB.slot(LLS.dialog).propagate == nil)
+LLS.dialog:GetScript("OnEvent")(LLS.dialog, "PLAYER_REGEN_ENABLED")
+Check("until the fight is over", STUB.slot(LLS.dialog).propagate == true)
+LLS:ClearSelection()
 
 print("== the action row ==")
 LLS:SelectFrame("Bar")
@@ -221,14 +247,29 @@ Check("it is enabled, because there is something to pick", row.Dropdown:IsEnable
 print("== the dialog fits on the screen ==")
 local dialog = LLS.dialog
 local fullHeight = dialog:GetHeight()
-Check("as tall as its rows on a large screen", fullHeight == dialog.libCanvas:GetHeight() + 48 + 20)
+Check("as tall as its rows on a large screen, and a little more", fullHeight == dialog.libCanvas:GetHeight() + 48 + 20 + 3)
 -- Selecting the frame that is already selected redraws nothing, so let go first.
 UIParent:SetHeight(fullHeight)
 LLS:ClearSelection()
 LLS:SelectFrame("Bar")
 Check("no taller than 90% of a smaller one", dialog:GetHeight() == math.floor(fullHeight * 0.9))
 Check("the rows scrolling in what is left", dialog.libCanvas:GetHeight() > dialog:GetHeight() - 48 - 20)
+-- Rows that would overrun 90% of the screen by only a little are shown whole.
+UIParent:SetHeight(math.ceil((fullHeight - 3) / 0.93))
+LLS:ClearSelection()
+LLS:SelectFrame("Bar")
+Check("but whole when they only just overrun it", dialog:GetHeight() == fullHeight)
 UIParent:SetHeight(1080)
+LLS:ClearSelection()
+LLS:SelectFrame("Bar")
+-- A control hanging below its row leaves something to scroll, as measured in the
+-- game, which the dialog grows by and keeps.
+STUB.slot(dialog.libScroll).scripts.OnScrollRangeChanged(dialog.libScroll, 0, 3.5)
+Check("rows reaching further than laid out grow the dialog", dialog:GetHeight() == fullHeight + 3.5)
+LLS:ClearSelection()
+LLS:SelectFrame("Bar")
+Check("and it stays grown when drawn again", dialog:GetHeight() == fullHeight + 3.5)
+dialog.libOverhang = nil
 LLS:ClearSelection()
 LLS:SelectFrame("Bar")
 
@@ -276,8 +317,11 @@ local ok = pcall(LLS.RegisterFrame, LLS, "Bad", {
   settings = { { type = "actions", name = "No actions" } },
   GetSetting = function() end,
   SetSetting = function() end,
+  EditSetting = function() end,
   GetPosition = function() return "CENTER", "CENTER", 0, 0 end,
   SetPosition = function() end,
+  EditPosition = function() end,
+  RestoreOwnSettings = function() end,
 })
 Check("an action row with no actions is refused", not ok)
 
